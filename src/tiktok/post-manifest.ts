@@ -7,4 +7,5 @@ export interface PostManifest {
     caption?: string;
     account?: string;
     destination: 'draft' | 'publish';
+    mode?: 'auto' | 'photo';
 }

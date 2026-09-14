@@ -69,6 +69,13 @@ if (customCommands.includes('POST:@"/wda/pressButton"].withoutSession')) {
     console.log('Applied WDA sessionless device-button patch');
 }
 
+if (process.platform !== 'darwin') {
+    throw new Error(
+        'WDA source is patched, but signing/building WebDriverAgent requires macOS with full Xcode. '
+        + 'Boot this machine into macOS, install the same XCUITest driver, and run npm run wda:prepare there.',
+    );
+}
+
 const developerDir = resolveDeveloperDir();
 const teamId = required('XCODE_ORG_ID');
 const bundleId = required('WDA_BUNDLE_ID');

@@ -16,6 +16,16 @@
   <div class="timing" data-timing><label>Schedule<select name="timingKind"><option value="now">Run now</option><option value="once">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label><label>When / local time<input name="time" type="datetime-local"></label><label>Weekdays (0–6)<input name="weekdays" placeholder="1,3,5"></label></div>
   <button type="submit">Upload and schedule</button>
 </form>
+<form id="tiktok-photo-post-form" class="tiktok-form">
+  <h3>Photo Mode</h3>
+  <p>Ordered image carousel. Public publishing always requires explicit approval; drafts do not.</p>
+  <label>Slides (1–35 images, in post order)<input name="media" type="file" accept="image/*" multiple required></label>
+  <div class="timing"><label>Account<input name="account" required autocomplete="off"></label><label>Destination<select name="destination"><option value="draft">Draft</option><option value="publish">Publish</option></select></label><label>Music URL<input name="musicUrl" type="url"></label></div>
+  <label>Caption<textarea name="caption" maxlength="2200"></textarea></label>
+  <label><input name="publishConfirmed" type="checkbox"> I explicitly approve this public Photo Mode post</label>
+  <div class="timing" data-timing><label>Schedule<select name="timingKind"><option value="now">Run now</option><option value="once">Once</option></select></label><label>When / local time<input name="time" type="datetime-local"></label></div>
+  <button type="submit">Upload Photo Mode deck</button>
+</form>
 <p id="tiktok-form-result" class="muted"></p>
 <script>
 (function () {
@@ -55,6 +65,22 @@
       var payload = {media: assets.map(function (asset) { return {assetId: asset.id, name: asset.name, mimeType: asset.mimeType}; }), destination: form.get('destination'), account: form.get('account')};
       if (form.get('caption')) payload.caption = form.get('caption'); if (form.get('musicUrl')) payload.musicUrl = form.get('musicUrl'); if (form.has('recurringPublishConfirmed')) payload.recurringPublishConfirmed = true;
       await schedule('post', payload, timing(form), assets.map(function (asset) { return asset.id; }));
+    } catch (error) { if (assets.length) await fetch('/api/assets', {method: 'DELETE', headers: {'content-type': 'application/json'}, body: JSON.stringify({assetIds: assets.map(function (asset) { return asset.id; })})}); result.textContent = error.message; }
+  });
+  document.getElementById('tiktok-photo-post-form').addEventListener('submit', async function (event) {
+    event.preventDefault(); result.textContent = 'Uploading Photo Mode deck…'; var assets = [];
+    try {
+      var form = new FormData(event.currentTarget); var files = form.getAll('media').filter(function (file) { return file.size; });
+      if (files.length < 1 || files.length > 35) throw new Error('Choose one to 35 images.');
+      if (files.some(function (file) { return !String(file.type || '').startsWith('image/'); })) throw new Error('Photo Mode accepts images only.');
+      if (form.get('destination') === 'publish' && !form.has('publishConfirmed')) throw new Error('Explicit approval is required before public publishing.');
+      var upload = new FormData(); files.forEach(function (file) { upload.append('media', file); });
+      var uploadResponse = await fetch('/api/assets', {method: 'POST', body: upload});
+      if (!uploadResponse.ok) throw new Error((await uploadResponse.json()).error || 'Upload failed');
+      assets = await uploadResponse.json();
+      var payload = {media: assets.map(function (asset) { return {assetId: asset.id, name: asset.name, mimeType: asset.mimeType}; }), destination: form.get('destination'), account: form.get('account')};
+      if (form.get('caption')) payload.caption = form.get('caption'); if (form.get('musicUrl')) payload.musicUrl = form.get('musicUrl'); if (form.has('publishConfirmed')) payload.publishConfirmed = true;
+      await schedule('photo-post', payload, timing(form), assets.map(function (asset) { return asset.id; }));
     } catch (error) { if (assets.length) await fetch('/api/assets', {method: 'DELETE', headers: {'content-type': 'application/json'}, body: JSON.stringify({assetIds: assets.map(function (asset) { return asset.id; })})}); result.textContent = error.message; }
   });
 })();

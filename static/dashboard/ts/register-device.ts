@@ -130,7 +130,7 @@ async function action(name: 'refresh' | 'prepare' | 'verify' | 'finalize'): Prom
 document.querySelector<HTMLButtonElement>('#refresh-candidates')!.addEventListener('click', () => void candidates());
 document.querySelector<HTMLButtonElement>('#action-refresh')!.addEventListener('click', () => void action('refresh'));
 document.querySelector<HTMLButtonElement>('#action-prepare')!.addEventListener('click', () => {
-    if (!authorize.checked && !window.confirm('Continue without allowing automatic Apple Developer team device registration? Xcode may ask you to register it manually.')) return;
+    if (!authorize.checked && !window.confirm('Continue without authorizing Apple Developer team registration? This is only needed when the WDA provisioning step runs on macOS/Xcode.')) return;
     void action('prepare');
 });
 document.querySelector<HTMLButtonElement>('#action-verify')!.addEventListener('click', () => void action('verify'));

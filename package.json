@@ -26,9 +26,12 @@
     "./worker": "./src/scheduler/worker.ts"
   },
   "scripts": {
-    "appium": "APPIUM_HOME=.appium2 node node_modules/appium/index.js --address 127.0.0.1 --base-path / --port 4725 --log-level info",
-    "appium:install-driver": "APPIUM_HOME=.appium2 appium driver install xcuitest@7.26.3",
+    "appium": "APPIUM_HOME=.appium2 appium --address 127.0.0.1 --base-path / --port 4725 --log-level info",
+    "appium:install-driver": "node scripts/ensure-xcuitest.mjs",
+    "remotexpc:tunnel": "node scripts/remotexpc-tunnel.mjs",
+    "linux:preflight": "node scripts/linux-preflight.mjs",
     "wda:prepare": "node --env-file-if-exists=.env --env-file-if-exists=.env.devices --import tsx src/devices/wda/prepare.ts",
+    "wda:provision": "node --env-file-if-exists=.env --env-file-if-exists=.env.devices --import tsx src/devices/wda/provision.ts",
     "wda:service": "node --env-file-if-exists=.env --env-file-if-exists=.env.devices --import tsx src/devices/wda-service.ts",
     "db:up": "docker compose up -d --wait postgres",
     "db:generate": "drizzle-kit generate",
@@ -64,12 +67,12 @@
     "pg": "^8.23.0",
     "pg-boss": "^12.27.0",
     "sharp": "^0.35.3",
-    "webdriverio": "9.31.3"
+    "webdriverio": "9.31.9"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/pg": "^8.23.1",
-    "appium": "^2.19.0",
+    "appium": "^3.7.0",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"

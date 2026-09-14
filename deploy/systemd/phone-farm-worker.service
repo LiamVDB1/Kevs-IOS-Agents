@@ -1,0 +1,18 @@
+[Unit]
+Description=Phone Farm scheduler worker
+After=network.target docker.service phone-farm-appium.service phone-farm-wda.service
+Wants=phone-farm-appium.service phone-farm-wda.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__
+Environment=HOME=__HOME__
+Environment=PATH=__NODE_BIN__:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-__REPO__/.env
+ExecStart=__NODE_BIN__/npm run worker
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

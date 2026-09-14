@@ -147,7 +147,7 @@ async function action(name) {
 document.querySelector('#refresh-candidates').addEventListener('click', () => void candidates());
 document.querySelector('#action-refresh').addEventListener('click', () => void action('refresh'));
 document.querySelector('#action-prepare').addEventListener('click', () => {
-    if (!authorize.checked && !window.confirm('Continue without allowing automatic Apple Developer team device registration? Xcode may ask you to register it manually.'))
+    if (!authorize.checked && !window.confirm('Continue without authorizing Apple Developer team registration? This is only needed when the WDA provisioning step runs on macOS/Xcode.'))
         return;
     void action('prepare');
 });

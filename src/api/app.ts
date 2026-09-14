@@ -151,7 +151,11 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     const app = Fastify({ logger: options.logger ?? false, bodyLimit: 50 * 1024 * 1024 });
     await app.register(formbody);
     await app.register(cookie);
-    await app.register(multipart, { limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 20 } });
+    // Native iOS media import loads each file into memory before sending it to
+    // the patched WDA endpoint, which already rejects files above 350 MB.
+    // Keep the HTTP boundary aligned with that real limit while allowing
+    // TikTok's current 35-photo carousel ceiling.
+    await app.register(multipart, { limits: { fileSize: 350 * 1024 * 1024, files: 35 } });
 
     // Server-rendered HTML must never be cached — a stale page + fresh assets
     // (or vice versa) breaks the dashboard after a deploy.

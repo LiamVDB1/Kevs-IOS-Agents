@@ -1,5 +1,7 @@
 # Getting started
 
+> **Linux / dual-boot host:** the always-on farm can run on Linux for iOS 18+ through RemoteXPC. Use [linux-remotexpc.md](linux-remotexpc.md) for that path. The Xcode steps below remain the provisioning/signing path and the default macOS setup.
+
 Phone Farm iOS drives physical iPhones from a local dashboard: guided device
 registration, a live screen with remote tap/swipe, and a PostgreSQL‑backed
 scheduler that runs versioned automation tasks (TikTok and Instagram plugins
@@ -9,7 +11,7 @@ ship built‑in).
 
 | Requirement | Notes |
 | --- | --- |
-| macOS + Xcode | Real‑device builds and signing. `xcode-select -p` must point at an Xcode install, not the Command Line Tools. |
+| macOS + Xcode | Required to build/sign/provision WDA. It may be a separate boot/machine from the always-on Linux host. `xcode-select -p` must point at an Xcode install, not the Command Line Tools. |
 | Node.js 22+ | `engines.node >= 22`. The app runs TypeScript directly through `tsx`; there is no build step for the server. |
 | PostgreSQL 14+ | `docker compose up -d postgres` is provided, or bring your own and set `DATABASE_URL`. |
 | A physical iPhone | Developer‑enabled, trusted, connected by USB. |

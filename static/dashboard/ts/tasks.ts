@@ -1,6 +1,6 @@
 export {};
 
-type SocialTaskType = 'doomscroll' | 'post';
+type SocialTaskType = 'doomscroll' | 'post' | 'photo-post';
 
 interface Schedule {
     id: string;
@@ -115,7 +115,7 @@ function renderExecutions(items: Execution[]): void {
         }
         if (execution.status === 'failed' || execution.status === 'stopped') {
             actions.append(button('Retry', async () => {
-                if (execution.taskType === 'post'
+                if ((execution.taskType === 'post' || execution.taskType === 'photo-post')
                     && !window.confirm(`The post may already have reached ${pluginLabel(execution.pluginId)}. Retry only after checking the device.`)) return;
                 await request(`/api/executions/${execution.id}/retry`, { method: 'POST' }); await load();
             }));

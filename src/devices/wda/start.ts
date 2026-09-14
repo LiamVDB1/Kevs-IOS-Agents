@@ -5,6 +5,8 @@ import path from 'node:path';
 
 import { diagnoseWdaLaunchFailure, wdaUnavailableTooLong } from './diagnostics.js';
 import { resolveDeveloperDir } from './xcode-env.js';
+import { resolveWdaBackend, resolveWdaRunnerBundleId, remoteXpcLaunchEnvironment } from './host-mode.js';
+import { RemoteXpcWdaSupervisor } from './remotexpc.js';
 import { resolveTargetUdid } from './target-device.js';
 
 function required(name: string): string {
@@ -29,8 +31,9 @@ function report(state: WdaState, message: string): void {
 
 // `--udid <udid>`, or the sole registered / connected device, or IOS_UDID.
 const udid = await resolveTargetUdid();
-const teamId = required('XCODE_ORG_ID');
-const developerDir = resolveDeveloperDir();
+const backend = resolveWdaBackend();
+const teamId = backend === 'xcode' ? required('XCODE_ORG_ID') : undefined;
+const developerDir = backend === 'xcode' ? resolveDeveloperDir() : undefined;
 const driverPath = path.resolve(process.env.XCUITEST_DRIVER_PATH
     ?? '.appium2/node_modules/appium-xcuitest-driver');
 const projectPath = path.resolve(process.env.WDA_PROJECT_PATH ?? path.join(
@@ -46,7 +49,7 @@ const mjpegRemotePort = Number.parseInt(process.env.MJPEG_REMOTE_PORT ?? '9100',
 if (!process.env.MJPEG_SCALING_FACTOR) process.env.MJPEG_SCALING_FACTOR = '40';
 if (!process.env.MJPEG_SERVER_SCREENSHOT_QUALITY) process.env.MJPEG_SERVER_SCREENSHOT_QUALITY = '25';
 
-await access(projectPath);
+if (backend === 'xcode') await access(projectPath);
 if (![localPort, remotePort, mjpegLocalPort, mjpegRemotePort].every(Number.isSafeInteger)) {
     throw new Error('WDA and MJPEG port values must be integers');
 }
@@ -101,28 +104,30 @@ interface DeviceConnections {
 }
 interface IosUtilities {
     getConnectedDevices(): Promise<string[]>;
+    getOSVersion(udid: string): Promise<string>;
 }
 
-const { DEVICE_CONNECTIONS_FACTORY: deviceConnections } = require(factoryPath) as {
-    DEVICE_CONNECTIONS_FACTORY: DeviceConnections;
-};
+const deviceConnections = backend === 'xcode'
+    ? (require(factoryPath) as { DEVICE_CONNECTIONS_FACTORY: DeviceConnections }).DEVICE_CONNECTIONS_FACTORY
+    : undefined;
 const { utilities } = require('appium-ios-device') as { utilities: IosUtilities };
 
-const args = [
+const xcodeArgs = backend === 'xcode' ? [
     'test-without-building',
     '-project', projectPath,
     '-scheme', 'WebDriverAgentRunner',
     '-destination', `id=${udid}`,
     `IPHONEOS_DEPLOYMENT_TARGET=${process.env.IOS_PLATFORM_VERSION ?? '16.7'}`,
-    `DEVELOPMENT_TEAM=${teamId}`,
+    `DEVELOPMENT_TEAM=${teamId!}`,
     `PRODUCT_BUNDLE_IDENTIFIER=${required('WDA_BUNDLE_ID')}`,
     `CODE_SIGN_IDENTITY=${process.env.XCODE_SIGNING_ID ?? 'Apple Development'}`,
     'CODE_SIGN_STYLE=Automatic',
     'GCC_TREAT_WARNINGS_AS_ERRORS=0',
     'COMPILER_INDEX_STORE_ENABLE=NO',
-];
+] : [];
 
 let child: ChildProcess | undefined;
+let remoteSupervisor: RemoteXpcWdaSupervisor | undefined;
 let forwarding = false;
 let stopping = false;
 let locked = false;
@@ -133,13 +138,17 @@ let retryAt = 0;
 let launchFailure: string | undefined;
 
 function releaseForwarding(): void {
-    if (!forwarding) return;
+    if (!forwarding || !deviceConnections) return;
     forwarding = false;
     deviceConnections.releaseConnection(udid, localPort);
     deviceConnections.releaseConnection(udid, mjpegLocalPort);
 }
 
 async function stopRunner(): Promise<void> {
+    const remote = remoteSupervisor;
+    remoteSupervisor = undefined;
+    if (remote) await remote.stop();
+
     const running = child;
     child = undefined;
     if (running && running.exitCode === null && !running.killed) {
@@ -151,6 +160,10 @@ async function stopRunner(): Promise<void> {
         if (running.exitCode === null) running.kill('SIGKILL');
     }
     releaseForwarding();
+}
+
+function runnerStarted(): boolean {
+    return backend === 'remotexpc' ? remoteSupervisor !== undefined : child !== undefined;
 }
 
 function observeOutput(chunk: Buffer, stderr: boolean): void {
@@ -167,6 +180,41 @@ function observeOutput(chunk: Buffer, stderr: boolean): void {
 }
 
 async function startRunner(): Promise<void> {
+    locked = false;
+    launchFailure = undefined;
+    startedAt = Date.now();
+    lastReadyAt = undefined;
+
+    if (backend === 'remotexpc') {
+        const osVersion = await utilities.getOSVersion(udid);
+        const major = Number.parseInt(osVersion.split('.')[0] ?? '', 10);
+        if (!Number.isInteger(major) || major < 18) {
+            throw new Error(`RemoteXPC WDA requires iOS 18 or newer; device reports ${osVersion || 'unknown version'}`);
+        }
+        report('connecting', `Starting preinstalled WDA via RemoteXPC (iOS ${osVersion})`);
+        const supervisor = new RemoteXpcWdaSupervisor({
+            udid,
+            runnerBundleId: resolveWdaRunnerBundleId(),
+            wdaLocalPort: localPort,
+            wdaRemotePort: remotePort,
+            mjpegLocalPort,
+            mjpegRemotePort,
+            launchEnvironment: remoteXpcLaunchEnvironment({
+                wdaRemotePort: remotePort,
+                mjpegRemotePort,
+            }),
+        });
+        remoteSupervisor = supervisor;
+        try {
+            await supervisor.start();
+        } catch (error) {
+            if (remoteSupervisor === supervisor) remoteSupervisor = undefined;
+            throw error;
+        }
+        return;
+    }
+
+    if (!deviceConnections || !developerDir) throw new Error('Xcode WDA backend is not configured');
     await deviceConnections.requestConnection(udid, localPort, {
         usePortForwarding: true,
         devicePort: remotePort,
@@ -181,12 +229,8 @@ async function startRunner(): Promise<void> {
         releaseForwarding();
         throw error;
     }
-    locked = false;
-    launchFailure = undefined;
-    startedAt = Date.now();
-    lastReadyAt = undefined;
-    report('connecting', 'Starting WDA');
-    const running = spawn('xcodebuild', args, {
+    report('connecting', 'Starting WDA with xcodebuild');
+    const running = spawn('xcodebuild', xcodeArgs, {
         env: { ...process.env, DEVELOPER_DIR: developerDir },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -227,7 +271,7 @@ async function shutdown(): Promise<void> {
 process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 
-console.log(`Supervising persistent WDA for ${udid}`);
+console.log(`Supervising persistent WDA for ${udid} via ${backend}`);
 while (!stopping) {
     let connected = false;
     try {
@@ -236,11 +280,11 @@ while (!stopping) {
         report('error', `Could not inspect USB devices: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (!connected) {
-        if (child || forwarding) await stopRunner();
+        if (runnerStarted() || forwarding) await stopRunner();
         failures = 0;
         retryAt = 0;
         report('disconnected', 'Reconnect the USB cable');
-    } else if (child) {
+    } else if (runnerStarted()) {
         if (await wdaReady()) {
             failures = 0;
             locked = false;

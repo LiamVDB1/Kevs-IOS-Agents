@@ -28,6 +28,7 @@ export interface TikTokPluginConfiguration {
     doomscrollFollowingEntrypoint?: string;
     workflowReplayEntrypoint?: string;
     postEntrypoint?: string;
+    photoPostEntrypoint?: string;
     bundleId?: string;
 }
 
@@ -71,6 +72,17 @@ type PostPayload = JsonObject & {
     caption?: string;
     musicUrl?: string;
     recurringPublishConfirmed?: boolean;
+};
+
+const PHOTO_MODE_MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
+type PhotoPostPayload = JsonObject & {
+    media: PostMedia[];
+    destination: 'draft' | 'publish';
+    account?: string;
+    caption?: string;
+    musicUrl?: string;
+    publishConfirmed?: boolean;
 };
 
 /** 12 / 3 / 6 / 9 PM America/New_York — drain one ready pipeline item each tick. */
@@ -467,6 +479,93 @@ function createPostTask(configuration: TikTokPluginConfiguration): TaskDefinitio
     };
 }
 
+function createPhotoPostTask(configuration: TikTokPluginConfiguration): TaskDefinition<PhotoPostPayload> {
+    return {
+        type: 'photo-post', version: 1, displayName: 'TikTok Photo Mode post',
+        validate(value, context) {
+            const input = objectPayload(value);
+            if (!Array.isArray(input.media) || input.media.length < 1 || input.media.length > 35) {
+                throw new Error('Choose one to 35 images for Photo Mode');
+            }
+            const media = input.media.map((item) => {
+                const candidate = objectPayload(item);
+                if (typeof candidate.assetId !== 'string' || typeof candidate.name !== 'string' || typeof candidate.mimeType !== 'string') {
+                    throw new Error('Invalid Photo Mode media item');
+                }
+                if (!candidate.mimeType.startsWith('image/')) {
+                    throw new Error('Photo Mode accepts images only');
+                }
+                return { assetId: candidate.assetId, name: candidate.name, mimeType: candidate.mimeType };
+            });
+            if (input.destination !== 'draft' && input.destination !== 'publish') throw new Error('Invalid post destination');
+            const account = optionalString(input.account, 'account')?.trim();
+            if (account && !/^@[A-Za-z0-9._]{1,64}$/.test(account)) {
+                throw new Error('TikTok handles may contain letters, numbers, periods, and underscores');
+            }
+            const caption = optionalString(input.caption, 'caption');
+            if (caption && caption.length > 2200) throw new Error('Caption must be 2,200 characters or fewer');
+            const musicUrl = optionalString(input.musicUrl, 'musicUrl');
+            if (musicUrl) {
+                const parsed = new URL(musicUrl);
+                if (parsed.protocol !== 'https:' || !/(^|\.)tiktok\.com$/i.test(parsed.hostname)) {
+                    throw new Error('Music URL must be an HTTPS TikTok URL');
+                }
+            }
+            if (input.destination === 'publish' && (context.timingKind === 'daily' || context.timingKind === 'weekly')) {
+                throw new Error('Photo Mode public posts must be one-shot (now or once), not recurring');
+            }
+            if (input.destination === 'publish' && input.publishConfirmed !== true) {
+                throw new Error('Photo Mode public posts require explicit approval');
+            }
+            return {
+                media,
+                destination: input.destination,
+                ...(account ? { account } : {}),
+                ...(caption ? { caption } : {}),
+                ...(musicUrl ? { musicUrl } : {}),
+                ...(input.publishConfirmed === true ? { publishConfirmed: true } : {}),
+            };
+        },
+        summarize: (payload) => `Photo Mode · ${payload.destination} · ${payload.media.length} image${payload.media.length === 1 ? '' : 's'}`,
+        estimateDurationMs: () => 8 * 60_000,
+        retryPolicy: () => ({ retryLimit: 0, retryDelaySeconds: 0, retryBackoff: false }),
+        supportsStop: () => true,
+        async execute(context: TaskExecutionContext, payload) {
+            const byId = new Map(context.assets.map((asset) => [asset.id, asset]));
+            const files = payload.media.map((media) => {
+                const asset = byId.get(media.assetId);
+                if (!asset) throw new Error(`Scheduled Photo Mode asset ${media.assetId} is missing`);
+                if (!asset.mimeType.startsWith('image/')) {
+                    throw new Error(`Stored Photo Mode asset ${media.assetId} is not an image (${asset.mimeType})`);
+                }
+                if (asset.mimeType !== media.mimeType) {
+                    throw new Error(`Photo Mode asset ${media.assetId} MIME type does not match the stored upload metadata`);
+                }
+                if (asset.size > PHOTO_MODE_MAX_IMAGE_BYTES) {
+                    throw new Error(`Photo Mode image ${asset.name} exceeds the 25 MB per-image safety limit`);
+                }
+                return { path: asset.path, name: asset.name, mimeType: asset.mimeType };
+            });
+            const manifestPath = path.join(context.workspaceDirectory, 'manifest.json');
+            await writeFile(manifestPath, JSON.stringify({
+                device: context.device,
+                files,
+                destination: payload.destination,
+                mode: 'photo',
+                ...(payload.account ? { account: payload.account } : {}),
+                ...(payload.caption ? { caption: payload.caption } : {}),
+                ...(payload.musicUrl ? { musicUrl: payload.musicUrl } : {}),
+            }));
+            return context.runProcess({
+                entrypoint: configuration.photoPostEntrypoint
+                    ?? configuration.postEntrypoint
+                    ?? fileURLToPath(new URL('./tiktok/post.ts', import.meta.url)),
+                args: [manifestPath],
+            });
+        },
+    };
+}
+
 export function createTikTokPlugin(configuration: TikTokPluginConfiguration = {}): PhoneFarmPlugin {
     return {
         id: 'com.git-agni.tiktok',
@@ -477,6 +576,7 @@ export function createTikTokPlugin(configuration: TikTokPluginConfiguration = {}
             createFollowingDoomscrollTask(configuration),
             createWorkflowReplayTask(configuration),
             createPostTask(configuration),
+            createPhotoPostTask(configuration),
             createPipelineDrainTask(configuration),
         ],
         devicePanels: [{

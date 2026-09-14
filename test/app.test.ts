@@ -143,7 +143,7 @@ test('serves and drives the public registration wizard', async (context) => {
 
     const page = await inject(app, { method: 'GET', url: '/devices/register' });
     assert.equal(page.statusCode, 200);
-    assert.match(page.body, /Register an? (?:iOS )?device/i);
+    assert.match(page.body, /Register a(?:n)?(?:\s+(?:iOS\s+)?)?(?:<[^>]+>)*device/i);
 
     const candidates = await inject(app, { method: 'GET', url: '/api/device-registrations/candidates' });
     assert.equal(candidates.statusCode, 200);

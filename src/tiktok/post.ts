@@ -11,7 +11,7 @@ import { coordinateProfile, registeredAccounts } from './runtime-settings.js';
 import { switchTikTokAccount, tapCoordinate, typeText } from './actions.js';
 import { recentPickerTargets } from './post-layout.js';
 import { isRedCheckboxChecked } from './pixel.js';
-import { matchPickerCellToVideo, filterCellsByDurationBadge } from './post-picker-match.js';
+import { matchPickerCellToVideo, matchPickerCellsToImages, filterCellsByDurationBadge } from './post-picker-match.js';
 import { recognizeWords } from './ocr.js';
 
 const execFileAsync = promisify(execFile);
@@ -241,6 +241,7 @@ async function openComposer(
     coordinates: TikTokCoordinates['tiktok'],
     screenSize: { width: number; height: number },
     musicUrl?: string,
+    mode: 'auto' | 'photo' = 'auto',
 ): Promise<void> {
     if (musicUrl) {
         console.log(`Opening music URL: ${musicUrl}`);
@@ -273,26 +274,39 @@ async function openComposer(
         );
     }
     await driver.pause(2500);
-    // Camera defaults to PHOTO/TEXT often. Opening the gallery from PHOTO
-    // filters to stills — the first cell is a picture and TikTok routes it to
-    // Story. Switch to a video duration mode first so Recents shows videos.
-    try {
-        await clickOne(driver, '15s video mode', [
-            '~15s',
-            '-ios predicate string:(label == "15s" OR name == "15s") AND visible == 1',
-            '-ios class chain:**/XCUIElementTypeStaticText[`label == "15s"`]',
-            '-ios class chain:**/XCUIElementTypeButton[`label == "15s"`]',
+    if (mode === 'photo') {
+        // Photo Mode is a semantic requirement for Assayist decks. Do not fall
+        // back to a guessed coordinate: a wrong mode silently turns a carousel
+        // into a video/story, which is worse than a clean failure.
+        await clickOne(driver, 'Photo mode', [
+            '~Photo', '~Photos', '~Foto',
+            '-ios predicate string:(label == "Photo" OR name == "Photo" OR label == "Photos" OR name == "Photos" OR label == "Foto" OR name == "Foto") AND visible == 1',
+            '-ios class chain:**/XCUIElementTypeStaticText[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
+            '-ios class chain:**/XCUIElementTypeButton[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
         ]);
         await driver.pause(700);
-    } catch (error) {
-        const videoModeX = Math.round(screenSize.width * 0.40);
-        const videoModeY = Math.round(screenSize.height * 0.705);
-        console.log(
-            `15s control not found (${error instanceof Error ? error.message : String(error)}); `
-            + `tapping video mode at (${videoModeX}, ${videoModeY})`,
-        );
-        await tapCoordinate(driver, videoModeX, videoModeY, '15s video mode');
-        await driver.pause(700);
+    } else {
+        // Camera defaults to PHOTO/TEXT often. Opening the gallery from PHOTO
+        // filters to stills — the first cell is a picture and TikTok routes it to
+        // Story. Switch to a video duration mode first so Recents shows videos.
+        try {
+            await clickOne(driver, '15s video mode', [
+                '~15s',
+                '-ios predicate string:(label == "15s" OR name == "15s") AND visible == 1',
+                '-ios class chain:**/XCUIElementTypeStaticText[`label == "15s"`]',
+                '-ios class chain:**/XCUIElementTypeButton[`label == "15s"`]',
+            ]);
+            await driver.pause(700);
+        } catch (error) {
+            const videoModeX = Math.round(screenSize.width * 0.40);
+            const videoModeY = Math.round(screenSize.height * 0.705);
+            console.log(
+                `15s control not found (${error instanceof Error ? error.message : String(error)}); `
+                + `tapping video mode at (${videoModeX}, ${videoModeY})`,
+            );
+            await tapCoordinate(driver, videoModeX, videoModeY, '15s video mode');
+            await driver.pause(700);
+        }
     }
     // Gallery / Upload is the small Recents thumbnail at bottom-left (above All
     // effects). Do NOT tap top-center — that opens Sounds.
@@ -350,7 +364,7 @@ async function tapDurationBadge(
 
 async function chooseRecentMedia(
     driver: Browser, remote: WdaRemoteControl, udid: string, files: PostManifest['files'], assetCount: number,
-    coordinates: TikTokCoordinates['tiktok'],
+    coordinates: TikTokCoordinates['tiktok'], mode: 'auto' | 'photo' = 'auto',
 ): Promise<void> {
     const count = files.length;
     const primaryDuration = files[0] ? await probeMediaDurationSeconds(files[0].path) : undefined;
@@ -440,6 +454,48 @@ async function chooseRecentMedia(
         await driver.pause(3000);
         console.log(`Advanced from picker after ${label}`);
     };
+
+    if (mode === 'photo') {
+        if (!mediaCells.length) throw new Error('No Photo Mode media cells found in the TikTok picker');
+        await ensureCheckboxState(driver, remote, udid, {
+            x: coordinates.selectMultiple.x,
+            y: coordinates.selectMultiple.y,
+        }, 'Select multiple', count > 1);
+        const { scale } = await remote.getScreenInfo(udid);
+        const shot = await remote.getScreenshot(udid);
+        const candidates = mediaCells.map((cell) => ({
+            index: cell.index,
+            x: cell.x,
+            y: cell.y,
+            width: cell.width,
+            height: cell.height,
+        }));
+        const matches = await matchPickerCellsToImages(
+            shot,
+            scale,
+            candidates,
+            files.map(({ path: filePath }) => filePath),
+        );
+        for (const [selection, match] of matches.entries()) {
+            const tapX = Math.round(match.cell.x + match.cell.width / 2);
+            const tapY = Math.round(match.cell.y + match.cell.height / 2);
+            await tapCoordinate(
+                driver,
+                tapX,
+                tapY,
+                `Photo Mode media ${selection + 1}/${count} (visual score ${match.score.toFixed(1)})`,
+            );
+            await driver.pause(600);
+        }
+        if (count > 1) {
+            await ensureCheckboxState(driver, remote, udid, {
+                x: coordinates.useLayout.x,
+                y: coordinates.useLayout.y,
+            }, 'Use layout', false);
+        }
+        await advanceAfterSelect('verified Photo Mode image matching');
+        return;
+    }
 
     // Single-file: stay on the visible All grid. Newest WDA import = bottom row, R→L.
     if (count === 1 && files[0] && mediaCells.length) {
@@ -771,8 +827,24 @@ for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptio
                 );
             }
         }
-        await openComposer(driver, deviceRemote, manifest.device.udid, tiktokCoordinates, coordinates.screenSize, manifest.musicUrl);
-        await chooseRecentMedia(driver, deviceRemote, manifest.device.udid, manifest.files, assetCount, tiktokCoordinates);
+        await openComposer(
+            driver,
+            deviceRemote,
+            manifest.device.udid,
+            tiktokCoordinates,
+            coordinates.screenSize,
+            manifest.musicUrl,
+            manifest.mode ?? 'auto',
+        );
+        await chooseRecentMedia(
+            driver,
+            deviceRemote,
+            manifest.device.udid,
+            manifest.files,
+            assetCount,
+            tiktokCoordinates,
+            manifest.mode ?? 'auto',
+        );
         reachedCaptionScreen = true;
     } catch (error) {
         lastAttemptError = error;

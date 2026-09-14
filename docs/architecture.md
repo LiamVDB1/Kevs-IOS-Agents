@@ -64,23 +64,31 @@ Headless. Owns task execution.
 Persistent WebDriverAgent supervisor, controlled over a Unix socket
 (`.wda/wda-service.sock`).
 
-- Keeps one WDA session alive per registered device, (re)launching
-  `xcodebuild test-without-building` as needed and USB‑forwarding WDA
-  (`8100`, `8101`, …) and MJPEG (`9100`, `9101`, …).
+- Keeps one WDA runner alive per registered device. On macOS/Xcode it (re)launches
+  `xcodebuild test-without-building` and USB-forwards WDA/MJPEG. On Linux it
+  launches the already-signed runner through RemoteXPC DVT process control and
+  creates RemoteXPC localhost forwards. Both backends expose WDA as (`8100`,
+  `8101`, …) and MJPEG as (`9100`, `9101`, …) to the rest of the application.
 - `GET /health` on the socket reports per‑device `{ physical, wda, appium,
   message }`. States: `ready`, `unlock-required`, `error`, …
 - Single‑supervisor by design; a lock prevents duplicates.
 
 ### `appium` — `appium --address 127.0.0.1 --port 4725`
-Appium 3 with the XCUITest driver, isolated in `APPIUM_HOME=.appium2`. Task
+Appium 3 with the XCUITest driver, isolated in `APPIUM_HOME=.appium2`. Repository
+scripts pin Appium 3.7.0 and XCUITest 12.12.4. Task
 subprocesses (e.g. `src/tiktok/doomscroll.ts`) connect to it with
 `webdriverio`. The dashboard's remote control does **not** go through Appium —
 it talks to WDA directly. Binds loopback only.
 
-## Xcode, signing, and device pairing
+## WDA backends, signing, and device pairing
 
-The farm never talks to a device directly at the USB level for *control* — it
-delegates the whole pair/trust/sign/launch chain to Xcode's toolchain:
+`WDA_BACKEND` defaults to `xcode` on macOS and `remotexpc` on other hosts. The
+macOS backend owns the full pair/sign/launch workflow. The Linux backend requires
+iOS 18+, an active RemoteXPC tunnel, and a WDA runner that was previously signed
+and installed from macOS. See `docs/linux-remotexpc.md`.
+
+For the macOS/Xcode backend, the farm delegates the pair/trust/sign/launch chain
+to Xcode's toolchain:
 
 - **Pairing & trust** are the OS's job. An iPhone must be paired (USB + "Trust
   This Computer") and, on iOS 16+, have **Developer Mode** enabled before any

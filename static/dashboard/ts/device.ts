@@ -36,7 +36,7 @@ interface PostRun {
     logs: string[];
 }
 
-type SocialTaskType = 'doomscroll' | 'doomscroll-following' | 'post';
+type SocialTaskType = 'doomscroll' | 'doomscroll-following' | 'post' | 'photo-post';
 type SocialPluginId = 'com.git-agni.tiktok' | 'com.git-agni.instagram' | string;
 type CalibrateApp = 'tiktok' | 'instagram';
 
@@ -964,6 +964,9 @@ function taskTitle(taskType: DeviceSchedule['taskType'], payload?: DeviceSchedul
         const details = payload?.durationMinutes ? ` · ${payload.durationMinutes} min` : '';
         return `${app} ${label}${details}`;
     }
+    if (taskType === 'photo-post') {
+        return payload?.account ? `${app} · Photo Mode · ${payload.account}` : `${app} · Photo Mode`;
+    }
     return payload?.account ? `${app} · publish · ${payload.account}` : `${app} · publish`;
 }
 
@@ -1019,7 +1022,8 @@ function renderDeviceExecutions(executions: DeviceExecution[]): void {
     const running = executions.filter((execution) => execution.status === 'running').length;
     const queued = executions.filter((execution) => execution.status === 'queued').length;
     // Warmup/doomscroll is light enough to keep Live Control; post/upload is not.
-    if (executions.some((execution) => execution.status === 'running' && execution.taskType === 'post')) {
+    if (executions.some((execution) => execution.status === 'running'
+        && (execution.taskType === 'post' || execution.taskType === 'photo-post'))) {
         pauseStreamForAutomation();
     }
     if (running || queued) {
@@ -1058,7 +1062,7 @@ function renderDeviceExecutions(executions: DeviceExecution[]): void {
         }
         if (execution.status === 'failed' || execution.status === 'stopped') {
             actions.append(taskActionButton('Retry', async () => {
-                if (execution.taskType === 'post') {
+                if (execution.taskType === 'post' || execution.taskType === 'photo-post') {
                     const app = pluginLabel(execution.pluginId);
                     if (!window.confirm(`The post may already have reached ${app}. Retry only after checking the device.`)) return;
                 }

@@ -188,6 +188,83 @@ export async function filterCellsByDurationBadge(
  * imported video. Duration badges are not in the accessibility tree, and
  * TikTok Videos sorts by file creation date — so top-left is often wrong.
  */
+export async function matchPickerCellsToImages(
+    screenshot: Buffer,
+    scale: number,
+    cells: PickerMatchCell[],
+    imagePaths: string[],
+): Promise<PickerMatchResult[]> {
+    if (!imagePaths.length) return [];
+    if (imagePaths.length > cells.length) {
+        throw new Error(`Could not confidently match ${imagePaths.length} imported images: only ${cells.length} picker cells are visible`);
+    }
+
+    const picker = sharp(screenshot);
+    const meta = await picker.metadata();
+    const imgW = meta.width ?? 0;
+    const imgH = meta.height ?? 0;
+    const validCells: Array<{ cell: PickerMatchCell; sample: Buffer }> = [];
+    for (const cell of cells) {
+        const left = Math.round(cell.x * scale);
+        const top = Math.round(cell.y * scale);
+        const width = Math.round(cell.width * scale);
+        const height = Math.round(cell.height * scale);
+        if (left < 0 || top < 0 || left + width > imgW || top + height > imgH || width < 20 || height < 20) {
+            continue;
+        }
+        const crop = {
+            left: left + Math.round(width * 0.08),
+            top: top + Math.round(height * 0.05),
+            width: Math.max(8, Math.round(width * 0.84)),
+            height: Math.max(8, Math.round(height * 0.8)),
+        };
+        validCells.push({
+            cell,
+            sample: await sampleRgb(await picker.clone().extract(crop).toBuffer()),
+        });
+    }
+    if (imagePaths.length > validCells.length) {
+        throw new Error(`Could not confidently match ${imagePaths.length} imported images: only ${validCells.length} usable picker cells are visible`);
+    }
+
+    const sourceSamples = await Promise.all(imagePaths.map(async (imagePath) => sampleRgb(await readFile(imagePath))));
+    const scores = sourceSamples.map((source) => validCells.map(({ sample }) => meanAbsDiff(source, sample)));
+    const availableCells = new Set(validCells.map((_, index) => index));
+    const unassignedSources = new Set(sourceSamples.map((_, index) => index));
+    const assignments = new Map<number, PickerMatchResult>();
+
+    while (unassignedSources.size) {
+        let chosen: { sourceIndex: number; cellIndex: number; score: number; runnerUp: number } | undefined;
+        for (const sourceIndex of unassignedSources) {
+            const ranked = [...availableCells]
+                .map((cellIndex) => ({ cellIndex, score: scores[sourceIndex]![cellIndex]! }))
+                .sort((a, b) => a.score - b.score);
+            const best = ranked[0];
+            if (!best) continue;
+            const runnerUp = ranked[1]?.score ?? Number.POSITIVE_INFINITY;
+            if (!chosen || best.score < chosen.score
+                || (best.score === chosen.score && (runnerUp - best.score) > (chosen.runnerUp - chosen.score))) {
+                chosen = { sourceIndex, cellIndex: best.cellIndex, score: best.score, runnerUp };
+            }
+        }
+        if (!chosen || !acceptMatch(chosen.score, chosen.runnerUp)) {
+            const detail = chosen
+                ? `best score ${chosen.score.toFixed(1)}${Number.isFinite(chosen.runnerUp) ? `, runner-up ${chosen.runnerUp.toFixed(1)}` : ''}`
+                : 'no candidate cell';
+            throw new Error(`Could not confidently match imported Photo Mode images (${detail})`);
+        }
+        assignments.set(chosen.sourceIndex, {
+            cell: validCells[chosen.cellIndex]!.cell,
+            score: chosen.score,
+            runnerUpScore: chosen.runnerUp,
+        });
+        unassignedSources.delete(chosen.sourceIndex);
+        availableCells.delete(chosen.cellIndex);
+    }
+
+    return imagePaths.map((_, sourceIndex) => assignments.get(sourceIndex)!);
+}
+
 export async function matchPickerCellToVideo(
     screenshot: Buffer,
     scale: number,

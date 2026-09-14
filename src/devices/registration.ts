@@ -14,6 +14,7 @@ import { loadRegisteredDevices, mutateRegisteredDevices, type RegisteredDevice }
 import { passcodeForDevice, setDevicePasscode } from './secrets.js';
 import { WdaRemoteControl } from './wda-remote.js';
 import { diagnoseWdaLaunchFailure } from './wda/diagnostics.js';
+import { resolveWdaBackend } from './wda/host-mode.js';
 
 export type RegistrationCheckState = 'pending' | 'checking' | 'blocked' | 'passed' | 'failed';
 export type RegistrationAction = 'refresh' | 'prepare' | 'verify' | 'finalize';
@@ -323,13 +324,28 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
     private async refresh(session: RegistrationSession): Promise<void> {
         session.checks.host = check('checking', 'Checking local iOS tooling');
         session.checks.connection = check('checking', 'Checking the USB device');
-        const driverProject = path.resolve(this.workspaceRoot, process.env.XCUITEST_DRIVER_PATH
-            ?? '.appium2/node_modules/appium-xcuitest-driver', 'node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj');
+        const backend = resolveWdaBackend();
+        const driverRoot = path.resolve(this.workspaceRoot, process.env.XCUITEST_DRIVER_PATH
+            ?? '.appium2/node_modules/appium-xcuitest-driver');
+        const driverProject = path.join(driverRoot, 'node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj');
         try {
-            await Promise.all([access(driverProject), access(process.env.XCODE_DEVELOPER_DIR ?? '/Applications/Xcode_26.2.app/Contents/Developer')]);
-            session.checks.host = check('passed', 'Xcode, XCUITest, and WebDriverAgent are available');
+            if (backend === 'xcode') {
+                await Promise.all([
+                    access(driverProject),
+                    access(process.env.XCODE_DEVELOPER_DIR ?? '/Applications/Xcode_26.2.app/Contents/Developer'),
+                ]);
+                session.checks.host = check('passed', 'Xcode, XCUITest, and WebDriverAgent are available');
+            } else {
+                await Promise.all([
+                    access(path.join(driverRoot, 'package.json')),
+                    access(path.join(driverRoot, 'node_modules/appium-ios-remotexpc/package.json')),
+                ]);
+                session.checks.host = check('passed', 'XCUITest and RemoteXPC are available for Linux device control');
+            }
         } catch {
-            session.checks.host = check('blocked', 'Install the repository XCUITest driver and configure XCODE_DEVELOPER_DIR');
+            session.checks.host = backend === 'xcode'
+                ? check('blocked', 'Install the repository XCUITest driver and configure XCODE_DEVELOPER_DIR')
+                : check('blocked', 'Run npm run appium:install-driver to install current XCUITest + RemoteXPC');
         }
         const connected = (await this.discoverDevices()).find(({ udid }) => udid === session.device.udid);
         if (connected) {
@@ -340,10 +356,21 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
         } else {
             session.checks.connection = check('blocked', 'Reconnect USB, unlock the device, and accept Trust This Computer');
         }
-        const signingValues = ['XCODE_ORG_ID', 'WDA_BUNDLE_ID'].filter((name) => !process.env[name]);
-        session.checks.signing = signingValues.length
-            ? check('blocked', `Configure ${signingValues.join(' and ')} in .env after signing in to Xcode`)
-            : check('passed', 'Shared WDA signing settings are configured');
+        if (backend === 'xcode') {
+            const signingValues = ['XCODE_ORG_ID', 'WDA_BUNDLE_ID'].filter((name) => !process.env[name]);
+            session.checks.signing = signingValues.length
+                ? check('blocked', `Configure ${signingValues.join(' and ')} in .env after signing in to Xcode`)
+                : check('passed', 'Shared WDA signing settings are configured');
+        } else {
+            const hasRunnerIdentity = Boolean(process.env.WDA_RUNNER_BUNDLE_ID || process.env.WDA_BUNDLE_ID);
+            session.checks.signing = hasRunnerIdentity
+                ? check('passed', 'Preinstalled WDA runner identity is configured')
+                : check('blocked', 'Set WDA_BUNDLE_ID after building/signing WDA from the macOS boot');
+            const major = Number.parseInt(session.device.osVersion?.split('.')[0] ?? '', 10);
+            session.checks.developer = Number.isInteger(major) && major >= 18
+                ? check('passed', `iOS ${session.device.osVersion} supports the RemoteXPC Linux path`)
+                : check('blocked', `RemoteXPC Linux control requires iOS 18+; device reports ${session.device.osVersion || 'unknown'}`);
+        }
         await this.inspectWda(session);
         await this.inspectTikTok(session);
         await this.inspectInstagram(session);
@@ -354,6 +381,29 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
         if (session.checks.connection.state !== 'passed' || session.checks.host.state !== 'passed') {
             throw new Error('Connect and trust the device and complete host setup before preparing WDA');
         }
+        const backend = resolveWdaBackend();
+        if (backend === 'remotexpc') {
+            if (session.checks.signing.state !== 'passed') {
+                throw new Error('Configure the signed WDA runner identity before starting RemoteXPC WDA');
+            }
+            if (session.checks.developer.state !== 'passed') {
+                throw new Error('RemoteXPC device readiness must pass before starting WDA');
+            }
+            session.checks.wda = check('checking', 'Launching the preinstalled signed WDA through RemoteXPC');
+            await this.startSupervisor(session);
+            const ready = await this.waitForEndpoint(`http://127.0.0.1:${session.wdaLocalPort}/status`, 120_000);
+            if (!ready) {
+                session.checks.wda = check(
+                    'blocked',
+                    'Preinstalled WDA did not become reachable. Confirm the RemoteXPC tunnel is running and build/sign/install WDA from the macOS boot first.',
+                );
+                return;
+            }
+            session.checks.wda = check('passed', 'Preinstalled WebDriverAgent launched through RemoteXPC and is reachable');
+            await this.refreshScreenProfiles(session);
+            return;
+        }
+
         session.checks.signing = check('checking', 'Building and provisioning WebDriverAgent');
         session.checks.developer = check('checking', 'Checking Developer Mode through an Xcode device build');
         session.checks.wda = check('checking', 'Preparing WebDriverAgent');

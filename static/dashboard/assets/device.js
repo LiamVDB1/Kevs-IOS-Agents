@@ -874,6 +874,9 @@ function taskTitle(taskType, payload, pluginId) {
         const details = payload?.durationMinutes ? ` · ${payload.durationMinutes} min` : '';
         return `${app} ${label}${details}`;
     }
+    if (taskType === 'photo-post') {
+        return payload?.account ? `${app} · Photo Mode · ${payload.account}` : `${app} · Photo Mode`;
+    }
     return payload?.account ? `${app} · publish · ${payload.account}` : `${app} · publish`;
 }
 function timingDescription(timing) {
@@ -930,7 +933,8 @@ function renderDeviceExecutions(executions) {
     const running = executions.filter((execution) => execution.status === 'running').length;
     const queued = executions.filter((execution) => execution.status === 'queued').length;
     // Warmup/doomscroll is light enough to keep Live Control; post/upload is not.
-    if (executions.some((execution) => execution.status === 'running' && execution.taskType === 'post')) {
+    if (executions.some((execution) => execution.status === 'running'
+        && (execution.taskType === 'post' || execution.taskType === 'photo-post'))) {
         pauseStreamForAutomation();
     }
     if (running || queued) {
@@ -968,7 +972,7 @@ function renderDeviceExecutions(executions) {
         }
         if (execution.status === 'failed' || execution.status === 'stopped') {
             actions.append(taskActionButton('Retry', async () => {
-                if (execution.taskType === 'post') {
+                if (execution.taskType === 'post' || execution.taskType === 'photo-post') {
                     const app = pluginLabel(execution.pluginId);
                     if (!window.confirm(`The post may already have reached ${app}. Retry only after checking the device.`))
                         return;

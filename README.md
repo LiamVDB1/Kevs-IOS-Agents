@@ -9,6 +9,8 @@ It runs locally as-is; authentication is optional on a loopback bind. Harden it 
 ## Documentation
 
 - [docs/getting-started.md](docs/getting-started.md) — install, configure, run, register a device
+- [docs/linux-remotexpc.md](docs/linux-remotexpc.md) — run the always-on farm on Linux with a WDA signed from macOS
+- [docs/photo-mode.md](docs/photo-mode.md) — ordered TikTok Photo Mode publishing contract
 - [docs/architecture.md](docs/architecture.md) — the four processes, data stores, task model, source map
 - [docs/plugins.md](docs/plugins.md) — write a plugin: tasks, execution context, versioning, panels, routes
 - [docs/coordinates.md](docs/coordinates.md) — tap-layout profiles and how to add one
@@ -17,7 +19,7 @@ It runs locally as-is; authentication is optional on a loopback bind. Harden it 
 
 ## Run the standalone application
 
-Requirements are Node 22+, PostgreSQL, Xcode, a signed real-device WebDriverAgent, and Appium's XCUITest driver.
+Requirements are Node 22+, PostgreSQL, a physical iPhone, a signed real-device WebDriverAgent, and Appium's XCUITest driver. macOS + Xcode are required to build/sign WDA; the always-on farm can run on Linux for iOS 18+ through RemoteXPC.
 
 ```sh
 npm install
@@ -25,7 +27,8 @@ cp .env.example .env
 npm run appium:install-driver
 npm run db:up
 npm run db:migrate
-npm run wda:prepare
+# macOS/Xcode provisioning boot only:
+npm run wda:provision
 ```
 
 Run these long-lived processes (wrap each in a `launchd` agent or systemd unit for an always-on host):

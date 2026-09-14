@@ -1,0 +1,22 @@
+[Unit]
+Description=Phone Farm iOS RemoteXPC tunnel
+After=network.target usbmuxd.service
+Wants=usbmuxd.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__TUNNEL_RUNTIME__
+# The privileged service intentionally does not load the user-writable repo .env.
+# It executes only a root-owned runtime snapshot with the distro-owned Node binary.
+Environment=HOME=__HOME__
+ExecStart=/usr/bin/node __TUNNEL_RUNTIME__/node_modules/appium-xcuitest-driver/node_modules/appium-ios-remotexpc/scripts/tunnel-creation.mjs --reconnect-retries 0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# No phone exits cleanly; periodic restart makes USB attach self-healing.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
