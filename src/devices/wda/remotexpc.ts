@@ -4,6 +4,24 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
 const BACKGROUNDING_APP = 'com.apple.Preferences';
+// A tunnel that dies mid-handshake leaves testmanagerd/DVT calls pending
+// forever; bound them so the supervisor loop can retry on a fresh tunnel.
+const LAUNCH_TIMEOUT_MS = 90_000;
+const CLOSE_TIMEOUT_MS = 10_000;
+
+export async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 export interface RemoteXpcPortForwarder {
     start(): Promise<void>;
@@ -105,23 +123,26 @@ export const defaultRemoteXpcWdaRuntime: RemoteXpcWdaRuntime = {
             launchEnvironment: environment,
             killExisting: true,
         });
+        const close = () => withTimeout(runner.close(), CLOSE_TIMEOUT_MS, 'Closing the WDA XCTest session');
         try {
-            await runner.setupAndLaunch();
-            // With the Xcode 27 test stack the runner no longer backgrounds
-            // itself and XCTest aborts after 30s ("Failed to background test
-            // runner"). Foregrounding any other app satisfies that wait.
-            await delay(3_000);
-            const dvt = await remoteXpc.Services.startDVTService(udid);
-            try {
-                await dvt.processControl.launch({ bundleId: BACKGROUNDING_APP, environment: {}, killExisting: false });
-            } finally {
-                await dvt.dvtService.close();
-            }
+            await withTimeout((async () => {
+                await runner.setupAndLaunch();
+                // With the Xcode 27 test stack the runner no longer backgrounds
+                // itself and XCTest aborts after 30s ("Failed to background test
+                // runner"). Foregrounding any other app satisfies that wait.
+                await delay(3_000);
+                const dvt = await remoteXpc.Services.startDVTService(udid);
+                try {
+                    await dvt.processControl.launch({ bundleId: BACKGROUNDING_APP, environment: {}, killExisting: false });
+                } finally {
+                    await dvt.dvtService.close();
+                }
+            })(), LAUNCH_TIMEOUT_MS, 'Launching WDA through testmanagerd');
         } catch (error) {
-            await runner.close().catch(() => undefined);
+            await close().catch(() => undefined);
             throw error;
         }
-        return { close: () => runner.close() };
+        return { close };
     },
     async terminateRunner(udid, bundleId) {
         const remoteXpc = await loadRemoteXpcModule();
@@ -187,7 +208,11 @@ export class RemoteXpcWdaSupervisor {
         if (session) {
             await session.close().catch(() => undefined);
         } else if (this.started) {
-            await runtime.terminateRunner(this.options.udid, this.options.runnerBundleId).catch(() => undefined);
+            await withTimeout(
+                runtime.terminateRunner(this.options.udid, this.options.runnerBundleId),
+                CLOSE_TIMEOUT_MS,
+                'Terminating the WDA runner',
+            ).catch(() => undefined);
         }
         this.started = false;
         await this.stopForwarders();

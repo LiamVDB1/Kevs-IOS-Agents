@@ -262,7 +262,13 @@ export class DeviceConnectionManager implements DeviceConnections {
         runtime.outputBuffer = lines.pop() ?? '';
         for (const line of lines) {
             const state = parseSupervisorMessage(line);
-            if (!state) continue;
+            if (!state) {
+                // Surface supervisor failures in the service log; skip RemoteXPC debug chatter.
+                if (/\b(ERR!|WARN|Error|error)\b/.test(line) && !/^dbug\b/.test(line)) {
+                    console.error(`[wda ${runtime.device.udid}] ${line}`);
+                }
+                continue;
+            }
             if (state.state === 'error') runtime.status.retryCount += 1;
             if (state.state === 'ready') runtime.status.retryCount = 0;
             this.update(runtime, state.state, state.message);

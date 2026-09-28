@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { RemoteXpcWdaSupervisor, type RemoteXpcWdaRuntime } from '../src/devices/wda/remotexpc.js';
+import { RemoteXpcWdaSupervisor, withTimeout, type RemoteXpcWdaRuntime } from '../src/devices/wda/remotexpc.js';
 
 function fakeRuntime(events: string[]): RemoteXpcWdaRuntime {
     return {
@@ -99,4 +99,12 @@ test('RemoteXPC WDA supervisor closes the XCTest session instead of killing the 
     await supervisor.stop();
     assert.deepEqual(events.slice(-3), ['session:close', 'forward:stop:9103', 'forward:stop:8103']);
     assert.ok(!events.some((event) => event.startsWith('terminate:')));
+});
+
+test('withTimeout rejects a hung RemoteXPC call and passes through a prompt one', async () => {
+    await assert.rejects(
+        () => withTimeout(new Promise(() => undefined), 20, 'Launching WDA'),
+        /Launching WDA timed out/,
+    );
+    assert.equal(await withTimeout(Promise.resolve('ok'), 1_000, 'noop'), 'ok');
 });
