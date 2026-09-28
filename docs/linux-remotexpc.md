@@ -105,6 +105,32 @@ npm run web
 
 The rest of the application still sees WDA on localhost ports. `wda-service` launches the preinstalled runner with RemoteXPC DVT process control and creates localhost forwards for WDA and MJPEG. Existing dashboard, worker, remote-control, and plugin code therefore use the same contract on macOS and Linux.
 
+## Real-device notes (iPhone XR, iOS 18.7, Xcode 27)
+
+Verified end to end on 2026-09-28. These are the steps and behaviours that are not obvious from the architecture above.
+
+**One-time, by hand on the phone**
+
+- Pair with the Linux host while the phone is unlocked (tap Trust). An iOS update can invalidate the old pairing; the tunnel then logs `InvalidHostID`. Remove the stale record in `/var/lib/lockdown/` and pair again.
+- After provisioning: Settings → General → VPN & Device Management → trust the developer profile, and Settings → Developer → **Enable UI Automation**. Without the latter WDA launches but XCTest waits forever at "enabling automation".
+- A free Apple ID (Personal Team) signs for 7 days; re-run `npm run wda:provision` with the phone on the Mac before it expires.
+- For unattended use: no passcode (or store it in `devices.json`), automatic iOS updates off, Settings → Face ID & Passcode → Accessories on.
+- The first photo import asks WDA for Photos access (allow **Add Only**); TikTok needs full Photos access and camera access for its create screen. The microphone is not needed.
+
+**How WDA is launched**
+
+A plain process launch starts the runner without a test session, so the WDA server never opens. `wda-service` opens a testmanagerd XCTest session through RemoteXPC (what Xcode does) and keeps it for as long as WDA serves. With the Xcode 27 test stack the runner can no longer background itself ("Failed to background test runner"), so the launcher foregrounds Settings right after launch.
+
+**The tunnel drops every 30 minutes**
+
+The device drops the CoreDeviceProxy tunnel on a fixed ~30-minute cycle anchored to the clock, not to tunnel age, and the WDA test session dies with it. WDA's `/status` can keep answering while its XCTest authorization is gone ("Not authorized for performing UI testing actions").
+
+- `phone-farm-tunnel-watchdog.timer` probes the tunnel every 30 s, restarts it after a drop, and records the drop in `/var/lib/phone-farm/tunnel-drops`.
+- The WDA supervisor relaunches WDA whenever the tunnel identity changes.
+- The executor starts a task only when it fits before the predicted next drop and once WDA has had 90 s to settle on a new tunnel. Posts retry up to the publish form after waiting for WDA to recover; they never retry past the Drafts/Post tap.
+
+Do not probe the tunnel's RSD port in tight loops; the watchdog's 30-second check is enough.
+
 ## Failure boundaries
 
 - No iPhone in `linux:preflight`: the phone is connected to a different computer, is not trusted, or usbmuxd cannot see it.

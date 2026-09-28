@@ -55,6 +55,15 @@ For a public publish add:
 
 This flag is deliberately per-task approval. Public Photo Mode tasks are one-shot; recurring schedules are rejected rather than turning one approval into repeated publication.
 
+## How the picker is driven (iPhone XR, TikTok 2026-09)
+
+- Photo mode is confirmed by OCR of the camera's mode row: current TikTok builds label the mode carousel inconsistently in the accessibility tree. The flow never continues in an unconfirmed mode.
+- Upload is opened by its accessibility id `recordPageUploadButton`.
+- "Select multiple" stays on; images are selected through each thumbnail's corner circle (a plain tap opens a preview).
+- The imported slides are the newest cells of the Recents grid, in import order. The flow records their positions before the first pick; after that it only tracks the grid's vertical shift (the selection tray pushes the grid up a row and TikTok renumbers its accessibility cells). A 48 px grayscale comparison of each slide against its expected cell must confirm the mapping, or the flow aborts.
+- Picker Next, editor Next and the publish form's Post share one screen position. Every Next tap is preceded by a check that the publish form is not open; Drafts and Post are tapped only by accessibility label. On the editor, the Drafts coordinate is "Story 24h", which publishes a Story immediately.
+- Photo posts have a separate title field. `title` in the payload fills it; `caption` goes into the description. Focusing the description opens a full-screen editor without Drafts; the flow leaves it through its collapse icon.
+
 ## Current verification boundary
 
-The image-order matcher is covered with synthetic picker tests, including shuffled thumbnail order and a negative wrong-image case. Full native Photo Mode behavior still requires a real iPhone running the current TikTok UI; coordinate/accessibility changes in TikTok must be treated as runtime compatibility work rather than silently bypassed.
+Verified on hardware: a 4-slide Assayist deck saved as a TikTok draft on an iPhone XR (iOS 18.7) driven from Linux, including recovery from a tunnel drop mid-run. Public publishing has not been exercised; it requires `publishConfirmed: true`. Decks larger than one screen of picker cells, other iPhone models, and TikTok UI changes remain unverified.
