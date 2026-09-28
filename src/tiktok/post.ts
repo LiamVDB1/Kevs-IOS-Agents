@@ -868,6 +868,15 @@ async function addCaption(driver: Browser, coordinates: TikTokCoordinates['tikto
     }
 
     await driver.pause(400);
+    if (coordinates.captionCollapse) {
+        // Leave the full-screen description editor through its collapse icon
+        // while the keyboard still pins it in place; tapPublishOrDraft then
+        // insists on seeing the Drafts / Post form before touching anything.
+        await tapCoordinate(driver, coordinates.captionCollapse.x, coordinates.captionCollapse.y, 'collapse description editor');
+        await driver.pause(1000);
+        console.log('Caption added');
+        return;
+    }
     // Do NOT tap top-left "Back" — on the caption screen that chevron leaves the
     // composer and dumps the post into Drafts. Dismiss the keyboard instead.
     try {

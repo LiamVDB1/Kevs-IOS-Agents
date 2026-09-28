@@ -30,6 +30,11 @@ export interface SocialAppCoordinates {
     keyboardBack: Point;
     /** Empty publish-form area where a tap only dismisses the keyboard. */
     keyboardDismiss?: Point;
+    /**
+     * Collapse control of TikTok's full-screen description editor while the
+     * keyboard is up. Returns to the publish form (Drafts / Post) directly.
+     */
+    captionCollapse?: Point;
     draft: Point;
     finish: Point;
     like: Point;
@@ -466,8 +471,10 @@ export const DEVICE_COORDINATES = {
             pickerNext: { x: 306, y: 836 },
             editorNext: { x: 306, y: 836 },
             caption: { x: 207, y: 285 },
-            // Right of the cover tiles; (200, 180) would hit the "+ add photo" tile.
-            keyboardDismiss: { x: 340, y: 150 },
+            // Tapping the description opens a full-screen editor whose Post sits
+            // top-right and which has no Drafts; its collapse icon (right end of
+            // the # @ row above the keyboard) returns to the normal form.
+            captionCollapse: { x: 381, y: 564 },
             draft: { x: 108, y: 834 },
             finish: { x: 306, y: 834 },
             swipe: { x: 207, startY: 650, endY: 250, durationMs: 450 },

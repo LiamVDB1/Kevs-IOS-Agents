@@ -9,7 +9,7 @@ test('iPhone XR resolves to its calibrated profile', () => {
     assert.deepEqual(xr.screenSize, { width: 414, height: 896 });
     // Drafts and Post must never share a tap target.
     assert.notDeepEqual(xr.tiktok.draft, xr.tiktok.finish);
-    // The keyboard-dismiss tap must stay clear of the publish-form "+" tile (131–238 × 100–207).
-    const dismiss = xr.tiktok.keyboardDismiss!;
-    assert.ok(dismiss.x > 238 || dismiss.y > 207);
+    // The description editor is left through its collapse icon, not a blind dismiss tap.
+    assert.ok(xr.tiktok.captionCollapse);
+    assert.equal(xr.tiktok.keyboardDismiss, undefined);
 });
