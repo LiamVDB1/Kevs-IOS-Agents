@@ -7,6 +7,7 @@ import { discoverConnectedDevices, type Device } from '../devices/discovery.js';
 import { loadRegisteredDevices, type RegisteredDevice } from '../devices/registry.js';
 import { passcodeForDevice } from '../devices/secrets.js';
 import { WdaRemoteControl } from '../devices/wda-remote.js';
+import { requiredTunnelWindowMs, tunnelStartedAt, tunnelWindowRemainingMs } from '../devices/wda/tunnel-window.js';
 import type { ExecutionRow } from '../database/schema.js';
 import type { PluginRegistry } from '../registry.js';
 import type { TaskExecutionResult } from '../types.js';
@@ -20,7 +21,12 @@ async function endpointReady(url: string): Promise<boolean> {
     }
 }
 
-async function waitForDevice(execution: ExecutionRow, registered: RegisteredDevice, signal: AbortSignal): Promise<Device> {
+async function waitForDevice(
+    execution: ExecutionRow,
+    registered: RegisteredDevice,
+    signal: AbortSignal,
+    requiredWindowMs: number,
+): Promise<Device> {
     const wdaPort = registered.wdaLocalPort ?? Number(process.env.WDA_LOCAL_PORT ?? 8100);
     const appiumHost = process.env.APPIUM_HOST ?? '127.0.0.1';
     const appiumPort = Number(process.env.APPIUM_PORT ?? 4725);
@@ -31,7 +37,14 @@ async function waitForDevice(execution: ExecutionRow, registered: RegisteredDevi
         if (!device) lastProblem = 'device is offline';
         else if (!await endpointReady(`http://127.0.0.1:${wdaPort}/status`)) lastProblem = `WDA is unavailable on port ${wdaPort}`;
         else if (!await endpointReady(`http://${appiumHost}:${appiumPort}/status`)) lastProblem = `Appium is unavailable on port ${appiumPort}`;
-        else return device;
+        else {
+            // Never start a task on a tunnel that will rotate mid-run: the
+            // rotation kills WDA, and posts must not retry past the Post tap.
+            const startedAt = await tunnelStartedAt();
+            const remaining = startedAt === undefined ? Infinity : tunnelWindowRemainingMs(startedAt, Date.now());
+            if (remaining >= requiredWindowMs) return device;
+            lastProblem = `waiting for the RemoteXPC tunnel rotation (${Math.max(0, Math.round(remaining / 1000))}s left, task needs ${Math.round(requiredWindowMs / 1000)}s)`;
+        }
         await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
     throw new Error(`Execution window expired: ${lastProblem}`);
@@ -137,9 +150,15 @@ export async function executeAutomation(
     const stopPoll = setInterval(() => void repository.stopRequested(execution.id).then((requested) => {
         if (requested) controller.abort(new Error('Stop requested'));
     }).catch(console.error), 1_000);
+    let estimatedDurationMs = 10 * 60_000;
+    try {
+        estimatedDurationMs = plugins.task({
+            pluginId: execution.pluginId, taskType: execution.taskType, taskVersion: execution.taskVersion, payload: execution.payload,
+        }).estimateDurationMs(execution.payload);
+    } catch { /* unknown task: the definition lookup below reports it */ }
     let device: Device;
     try {
-        device = await waitForDevice(execution, registered, controller.signal);
+        device = await waitForDevice(execution, registered, controller.signal, requiredTunnelWindowMs(estimatedDurationMs));
     } catch (error) {
         clearInterval(stopPoll);
         signal.removeEventListener('abort', forwardAbort);

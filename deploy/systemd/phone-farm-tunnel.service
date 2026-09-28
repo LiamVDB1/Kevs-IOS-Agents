@@ -17,6 +17,10 @@ ProtectSystem=full
 # No phone exits cleanly; periodic restart makes USB attach self-healing.
 Restart=always
 RestartSec=10
+# iOS drops the CoreDeviceProxy tunnel ~30 minutes after creation. Rotate it
+# first so the executor can schedule tasks around a known cut
+# (TUNNEL_ROTATION_MS in src/devices/wda/tunnel-window.ts).
+RuntimeMaxSec=25min
 
 [Install]
 WantedBy=multi-user.target
