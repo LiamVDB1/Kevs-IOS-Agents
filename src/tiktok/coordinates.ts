@@ -5,7 +5,7 @@ export interface TikTokCoordinates {
         profileTab: Point; homeTab: Point; accountSwitcher: Point; create: Point; postContent: Point; upload: Point;
         selectMultiple: Point; useLayout: Point;
         picker: { circleX: number; columnStep: number; firstY: number; trayY: number; rowStep: number; cellX: number; cellStep: number; cellY: number };
-        pickerNext: Point; editorNext: Point; caption: Point; keyboardBack: Point; draft: Point; finish: Point;
+        pickerNext: Point; editorNext: Point; caption: Point; keyboardBack: Point; keyboardDismiss?: Point; draft: Point; finish: Point;
         like: Point; save: Point; followingTab: Point; comment: Point; commentComposer: Point; commentSend: Point;
         liveClose: Point;
         swipe: { x: number; startY: number; endY: number; durationMs: number };

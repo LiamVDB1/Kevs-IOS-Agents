@@ -504,6 +504,8 @@ function createPhotoPostTask(configuration: TikTokPluginConfiguration): TaskDefi
             }
             const caption = optionalString(input.caption, 'caption');
             if (caption && caption.length > 2200) throw new Error('Caption must be 2,200 characters or fewer');
+            const title = optionalString(input.title, 'title')?.trim();
+            if (title && title.length > 90) throw new Error('Title must be 90 characters or fewer');
             const musicUrl = optionalString(input.musicUrl, 'musicUrl');
             if (musicUrl) {
                 const parsed = new URL(musicUrl);
@@ -522,6 +524,7 @@ function createPhotoPostTask(configuration: TikTokPluginConfiguration): TaskDefi
                 destination: input.destination,
                 ...(account ? { account } : {}),
                 ...(caption ? { caption } : {}),
+                ...(title ? { title } : {}),
                 ...(musicUrl ? { musicUrl } : {}),
                 ...(input.publishConfirmed === true ? { publishConfirmed: true } : {}),
             };
@@ -554,6 +557,7 @@ function createPhotoPostTask(configuration: TikTokPluginConfiguration): TaskDefi
                 mode: 'photo',
                 ...(payload.account ? { account: payload.account } : {}),
                 ...(payload.caption ? { caption: payload.caption } : {}),
+                ...(payload.title ? { title: payload.title } : {}),
                 ...(payload.musicUrl ? { musicUrl: payload.musicUrl } : {}),
             }));
             return context.runProcess({

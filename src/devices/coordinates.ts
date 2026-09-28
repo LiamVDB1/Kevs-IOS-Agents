@@ -28,6 +28,8 @@ export interface SocialAppCoordinates {
     editorNext: Point;
     caption: Point;
     keyboardBack: Point;
+    /** Empty publish-form area where a tap only dismisses the keyboard. */
+    keyboardDismiss?: Point;
     draft: Point;
     finish: Point;
     like: Point;
@@ -250,6 +252,8 @@ const SX_X = 375 / 375;
 const SY_X = 812 / 667;
 const SX_13 = 390 / 375;
 const SY_13 = 844 / 667;
+const SX_XR = 414 / 375;
+const SY_XR = 896 / 667;
 const SX_17 = 402 / 375;
 const SY_17 = 874 / 667;
 
@@ -429,6 +433,46 @@ export const DEVICE_COORDINATES = {
             dmBack: { x: 24, y: 55 },
             swipe: { x: 130, startY: 721, endY: 197, durationMs: 380 },
         },
+    },
+    // TikTok chrome measured on a live iPhone XR (iOS 18.7, TikTok 2026-09):
+    // tab bar, camera Upload, Photos picker, photo editor and publish form.
+    // Instagram and the passcode keypad are scaled from other profiles and
+    // uncalibrated — recalibrate before relying on those taps.
+    iphoneXR: {
+        displayName: 'iPhone XR',
+        productTypes: ['iPhone11,8'],
+        screenSize: { width: 414, height: 896 },
+        passcodeKeypad: {
+            columnX: [114, 211, 304],
+            rowY: [296, 466, 570, 680],
+        },
+        tiktok: {
+            ...scaleSocial(IPHONE8_TIKTOK, SX_XR, SY_XR),
+            homeTab: { x: 41, y: 835 },
+            profileTab: { x: 372, y: 835 },
+            create: { x: 207, y: 838 },
+            followingTab: { x: 224, y: 70 },
+            like: { x: 383, y: 470 },
+            comment: { x: 383, y: 537 },
+            save: { x: 383, y: 603 },
+            // Camera screen bottom-left gallery thumbnail (a11y id recordPageUploadButton).
+            upload: { x: 34, y: 830 },
+            // Photos picker: "Select multiple" sits bottom-left; once anything is
+            // selected the grid shifts up and "Use layout" appears above the tray.
+            selectMultiple: { x: 24, y: 836 },
+            useLayout: { x: 24, y: 704 },
+            // Picker Next, editor Next and the publish form's Post share this
+            // spot — post.ts must confirm the screen before each tap here.
+            pickerNext: { x: 306, y: 836 },
+            editorNext: { x: 306, y: 836 },
+            caption: { x: 207, y: 285 },
+            // Right of the cover tiles; (200, 180) would hit the "+ add photo" tile.
+            keyboardDismiss: { x: 340, y: 150 },
+            draft: { x: 108, y: 834 },
+            finish: { x: 306, y: 834 },
+            swipe: { x: 207, startY: 650, endY: 250, durationMs: 450 },
+        },
+        instagram: scaleSocial(IPHONE8_INSTAGRAM, SX_XR, SY_XR),
     },
 } satisfies Record<string, DeviceCoordinates>;
 

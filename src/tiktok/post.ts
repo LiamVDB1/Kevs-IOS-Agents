@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import sharp from 'sharp';
 import { remote, type Browser } from 'webdriverio';
 
 import { loadRegisteredDevices, resolveDeviceCoordinates, WdaRemoteControl } from '@git-agni/phone-farm-core';
@@ -190,7 +191,9 @@ async function importMedia(manifest: PostManifest): Promise<number> {
         }
         assetCount = result.value?.assetCount ?? 0;
     }
-    if (!assetCount) throw new Error('WDA did not return the Photos asset count');
+    // With add-only Photos access (the least privilege WDA needs) the count is
+    // always 0. Only the legacy multi-select coordinate fallback depends on it.
+    if (!assetCount) console.log('Photos asset count unavailable (add-only access)');
     // Give Photos a beat to surface the import at the front of Recents.
     await new Promise((resolve) => setTimeout(resolve, 1500));
     return assetCount;
@@ -232,6 +235,108 @@ async function dismissContinueEditingDialog(
     // top card); harmless if the dialog is absent.
     await tapCoordinate(driver, 136, 105, 'Save draft (coord only)');
     await driver.pause(800);
+}
+
+// TikTok's publish form puts Post exactly where the picker and editor put
+// Next. A blind Next on the wrong screen publishes, so every Next tap is
+// preceded by this check and the flow insists on reaching the form itself.
+async function onPublishForm(driver: Browser): Promise<boolean> {
+    const drafts = await firstDisplayedQuick(driver, [
+        '-ios predicate string:type == "XCUIElementTypeButton" AND label == "Drafts" AND visible == 1',
+    ], 600);
+    return drafts !== undefined;
+}
+
+async function assertNotOnPublishForm(driver: Browser, step: string): Promise<void> {
+    if (await onPublishForm(driver)) {
+        throw new Error(`Refusing to tap ${step}: the TikTok publish form is already open and Post sits under that tap`);
+    }
+}
+
+async function waitForPublishForm(driver: Browser, timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (await onPublishForm(driver)) return;
+        await driver.pause(700);
+    }
+    throw new Error('TikTok publish form (Drafts / Post) did not appear after the editor');
+}
+
+const MODE_LABEL = /^(\d{1,2}[MS5]|PHOTO|TEXT)$/;
+const OCR_UPSCALE = 3;
+
+async function modeBandWords(remote: WdaRemoteControl, udid: string, screenSize: { width: number; height: number }) {
+    const { scale } = await remote.getScreenInfo(udid);
+    const shot = await remote.getScreenshot(udid);
+    const top = Math.round(screenSize.height * 0.68);
+    const height = Math.round(screenSize.height * 0.10);
+    const factor = scale * OCR_UPSCALE;
+    const band = await sharp(shot)
+        .extract({ left: 0, top: Math.round(top * scale), width: Math.round(screenSize.width * scale), height: Math.round(height * scale) })
+        .resize({ width: Math.round(screenSize.width * factor) })
+        .grayscale().threshold(190).negate().png().toBuffer();
+    const words = (await recognizeWords(band)).map((word) => ({
+        text: word.text.toUpperCase().replace(/[^A-Z0-9]/g, ''),
+        x: (word.x + word.width / 2) / factor,
+        y: top + (word.y + word.height / 2) / factor,
+    }));
+    // Anchor the mode row on words that look like mode labels; stray feed or
+    // camera text in the band would otherwise drag the row off the pill.
+    const labels = words.filter((word) => MODE_LABEL.test(word.text));
+    const rowY = labels.length
+        ? labels.map((word) => word.y).sort((a, b) => a - b)[Math.floor(labels.length / 2)]!
+        : screenSize.height * (651 / 896);
+    return { shot, scale, words, rowY };
+}
+
+/** OCR the white pill TikTok centers under the selected camera mode. */
+async function selectedModeLabel(
+    shot: Buffer, scale: number, screenSize: { width: number; height: number }, rowY: number,
+): Promise<string> {
+    const variants = [{ width: 56, height: 18, threshold: 160 }, { width: 64, height: 22, threshold: 128 }];
+    const seen: string[] = [];
+    for (const variant of variants) {
+        const pill = await sharp(shot)
+            .extract({
+                left: Math.round((screenSize.width / 2 - variant.width / 2) * scale),
+                top: Math.round((rowY - variant.height / 2) * scale),
+                width: Math.round(variant.width * scale),
+                height: Math.round(variant.height * scale),
+            })
+            .resize({ width: Math.round(variant.width * scale * OCR_UPSCALE) })
+            .grayscale().threshold(variant.threshold)
+            .extend({ top: 20, bottom: 20, left: 20, right: 20, background: '#ffffff' })
+            .png().toBuffer();
+        const text = (await recognizeWords(pill)).map((word) => word.text.toUpperCase()).join(' ');
+        if (text.includes('PHOTO')) return text;
+        seen.push(text);
+    }
+    return seen.join(' | ');
+}
+
+/**
+ * Current TikTok builds expose the camera mode carousel with labels that do
+ * not match the visible pills, so find PHOTO by OCR and verify the selected
+ * pill reads PHOTO afterwards. Never guess: a wrong mode turns a carousel
+ * into a video or Story.
+ */
+async function ensurePhotoModeByOcr(
+    driver: Browser, remote: WdaRemoteControl, udid: string, screenSize: { width: number; height: number },
+): Promise<void> {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const { shot, scale, words, rowY } = await modeBandWords(remote, udid, screenSize);
+        const selectedLabel = await selectedModeLabel(shot, scale, screenSize, rowY);
+        if (selectedLabel.includes('PHOTO')) {
+            console.log('Photo mode confirmed by OCR');
+            return;
+        }
+        console.log(`Selected camera mode reads ${JSON.stringify(selectedLabel)}; mode row: ${words.map((word) => word.text).join(' ')}`);
+        const photo = words.find((word) => word.text === 'PHOTO');
+        if (!photo) break;
+        await tapCoordinate(driver, Math.round(photo.x), Math.round(photo.y), `Photo mode (OCR, attempt ${attempt})`);
+        await driver.pause(1_000);
+    }
+    throw new Error('Could not confirm TikTok Photo mode on the camera screen');
 }
 
 async function openComposer(
@@ -278,13 +383,18 @@ async function openComposer(
         // Photo Mode is a semantic requirement for Assayist decks. Do not fall
         // back to a guessed coordinate: a wrong mode silently turns a carousel
         // into a video/story, which is worse than a clean failure.
-        await clickOne(driver, 'Photo mode', [
-            '~Photo', '~Photos', '~Foto',
-            '-ios predicate string:(label == "Photo" OR name == "Photo" OR label == "Photos" OR name == "Photos" OR label == "Foto" OR name == "Foto") AND visible == 1',
-            '-ios class chain:**/XCUIElementTypeStaticText[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
-            '-ios class chain:**/XCUIElementTypeButton[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
-        ]);
-        await driver.pause(700);
+        try {
+            await clickOne(driver, 'Photo mode', [
+                '~Photo', '~Photos', '~Foto',
+                '-ios predicate string:(label == "Photo" OR name == "Photo" OR label == "Photos" OR name == "Photos" OR label == "Foto" OR name == "Foto") AND visible == 1',
+                '-ios class chain:**/XCUIElementTypeStaticText[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
+                '-ios class chain:**/XCUIElementTypeButton[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
+            ]);
+            await driver.pause(700);
+        } catch (error) {
+            console.log(`Photo mode not in the accessibility tree (${error instanceof Error ? error.message : String(error)}); using OCR`);
+        }
+        await ensurePhotoModeByOcr(driver, remote, udid, screenSize);
     } else {
         // Camera defaults to PHOTO/TEXT often. Opening the gallery from PHOTO
         // filters to stills — the first cell is a picture and TikTok routes it to
@@ -310,7 +420,14 @@ async function openComposer(
     }
     // Gallery / Upload is the small Recents thumbnail at bottom-left (above All
     // effects). Do NOT tap top-center — that opens Sounds.
-    await tapCoordinate(driver, coordinates.upload.x, coordinates.upload.y, 'Upload');
+    try {
+        await clickOne(driver, 'Upload', [
+            '-ios predicate string:name == "recordPageUploadButton" AND visible == 1',
+            '~Upload',
+        ]);
+    } catch {
+        await tapCoordinate(driver, coordinates.upload.x, coordinates.upload.y, 'Upload');
+    }
     await driver.pause(2500);
 }
 
@@ -447,45 +564,46 @@ async function chooseRecentMedia(
         await driver.pause(1000);
         await savePostDebugScreenshot(remote, udid, 'picker-after-select');
         await driver.pause(2000);
+        await assertNotOnPublishForm(driver, 'picker Next');
         await tapCoordinate(driver, coordinates.pickerNext.x, coordinates.pickerNext.y, 'picker Next');
         await driver.pause(4000);
         await savePostDebugScreenshot(remote, udid, 'editor-before-next');
+        await assertNotOnPublishForm(driver, 'editor Next');
         await tapCoordinate(driver, coordinates.editorNext.x, coordinates.editorNext.y, 'editor Next');
-        await driver.pause(3000);
+        await waitForPublishForm(driver);
         console.log(`Advanced from picker after ${label}`);
     };
 
     if (mode === 'photo') {
         if (!mediaCells.length) throw new Error('No Photo Mode media cells found in the TikTok picker');
+        // Keep "Select multiple" on even for one image: a plain tap on a cell
+        // opens a preview, while the corner circle selects in both modes.
         await ensureCheckboxState(driver, remote, udid, {
             x: coordinates.selectMultiple.x,
             y: coordinates.selectMultiple.y,
-        }, 'Select multiple', count > 1);
+        }, 'Select multiple', true);
         const { scale } = await remote.getScreenInfo(udid);
-        const shot = await remote.getScreenshot(udid);
-        const candidates = mediaCells.map((cell) => ({
-            index: cell.index,
-            x: cell.x,
-            y: cell.y,
-            width: cell.width,
-            height: cell.height,
-        }));
-        const matches = await matchPickerCellsToImages(
-            shot,
-            scale,
-            candidates,
-            files.map(({ path: filePath }) => filePath),
-        );
-        for (const [selection, match] of matches.entries()) {
-            const tapX = Math.round(match.cell.x + match.cell.width / 2);
-            const tapY = Math.round(match.cell.y + match.cell.height / 2);
+        const selected = new Set<number>();
+        for (const [selection, file] of files.entries()) {
+            // The grid shifts once the selection tray appears, so re-read cell
+            // frames and re-match against a fresh screenshot for every image.
+            const pool = (await listPickerCells(driver))
+                .filter((cell) => !isCameraOrUtilityCell(cell.label, cell.name) && !selected.has(cell.index));
+            const [match] = await matchPickerCellsToImages(
+                await remote.getScreenshot(udid),
+                scale,
+                pool.map((cell) => ({ index: cell.index, x: cell.x, y: cell.y, width: cell.width, height: cell.height })),
+                [file.path],
+            );
+            if (!match) throw new Error(`Could not match Photo Mode image ${selection + 1}/${count}`);
+            selected.add(match.cell.index);
             await tapCoordinate(
                 driver,
-                tapX,
-                tapY,
-                `Photo Mode media ${selection + 1}/${count} (visual score ${match.score.toFixed(1)})`,
+                Math.round(match.cell.x + match.cell.width - 18),
+                Math.round(match.cell.y + 16),
+                `Photo Mode media ${selection + 1}/${count} selection circle (visual score ${match.score.toFixed(1)})`,
             );
-            await driver.pause(600);
+            await driver.pause(900);
         }
         if (count > 1) {
             await ensureCheckboxState(driver, remote, udid, {
@@ -614,18 +732,32 @@ async function chooseRecentMedia(
     throw new Error('No media cells found in the TikTok picker');
 }
 
+async function addTitle(driver: Browser, title?: string): Promise<void> {
+    if (!title) return;
+    const field = await firstDisplayedQuick(driver, [
+        '-ios predicate string:type == "XCUIElementTypeTextView" AND visible == 1 AND value BEGINSWITH[c] "Add a catchy title"',
+    ], 2_000);
+    if (!field) throw new Error('TikTok title field not found on the publish form');
+    await field.click();
+    await driver.pause(350);
+    await typeText(driver, title);
+    console.log(`Title entered (${title.length} chars)`);
+}
+
 async function addCaption(driver: Browser, coordinates: TikTokCoordinates['tiktok'], caption?: string): Promise<void> {
     if (!caption) return;
 
     // Prefer the description TextView — the first visible TextView is often the
     // hashtag chip/search box, which seeds a leading "#".
+    // Photo posts have a separate "Add a catchy title" TextView above the
+    // description; never match it here or the caption lands in the title.
     let field = await firstDisplayedQuick(driver, [
         '-ios predicate string:type == "XCUIElementTypeTextView" AND visible == 1 AND ('
-            + 'label CONTAINS[c] "Describe" OR name CONTAINS[c] "Describe" '
+            + 'value BEGINSWITH[c] "Writing a long" '
+            + 'OR label CONTAINS[c] "Describe" OR name CONTAINS[c] "Describe" '
             + 'OR label CONTAINS[c] "description" OR name CONTAINS[c] "description" '
-            + 'OR label CONTAINS[c] "caption" OR label CONTAINS[c] "Add a" '
-            + 'OR value CONTAINS[c] "Describe" OR value CONTAINS[c] "Add a")',
-        '-ios class chain:**/XCUIElementTypeTextView[`label CONTAINS[c] "Describe" OR label CONTAINS[c] "Add a"`]',
+            + 'OR value CONTAINS[c] "Describe") '
+            + 'AND NOT (value BEGINSWITH[c] "Add a catchy title")',
     ], 2_000);
 
     if (field) {
@@ -690,7 +822,8 @@ async function addCaption(driver: Browser, coordinates: TikTokCoordinates['tikto
         await driver.hideKeyboard();
         console.log('Keyboard dismissed via hideKeyboard');
     } catch {
-        await tapCoordinate(driver, 200, 180, 'dismiss keyboard (tap chrome-safe area)');
+        const dismiss = coordinates.keyboardDismiss ?? { x: 200, y: 180 };
+        await tapCoordinate(driver, dismiss.x, dismiss.y, 'dismiss keyboard (tap chrome-safe area)');
     }
     await driver.pause(800);
     console.log('Caption added');
@@ -704,12 +837,13 @@ async function tapPublishOrDraft(
     destination: 'draft' | 'publish',
 ): Promise<void> {
     await savePostDebugScreenshot(remote, udid, 'before-publish');
+    await waitForPublishForm(driver, 5_000);
     if (destination === 'publish') {
-        // Current TikTok publish form: red Post is top-right. Prefer that tap —
-        // a11y "Post" is flaky / sometimes matches other chrome while keyboard
-        // is still collapsing.
-        console.log(`Tapping Post at (${coordinates.finish.x}, ${coordinates.finish.y})`);
-        await tapCoordinate(driver, coordinates.finish.x, coordinates.finish.y, 'Post');
+        // Tap Post by its label only: on current layouts the same coordinate is
+        // Next on the previous screens, so a coordinate tap proves nothing.
+        await clickOne(driver, 'Post', [
+            '-ios predicate string:type == "XCUIElementTypeButton" AND label == "Post" AND visible == 1',
+        ]);
         await driver.pause(1200);
         // Second chance if first tap hit while keyboard was still up.
         try {
@@ -729,17 +863,14 @@ async function tapPublishOrDraft(
         // Upload continues in the background — tearing down too soon can interrupt it.
         await driver.pause(60_000);
     } else {
-        try {
-            await clickOne(driver, 'Drafts', [
-                '~Drafts',
-                '~Save draft',
-                '-ios predicate string:(label CONTAINS[c] "Draft") AND visible == 1',
-            ]);
-        } catch {
-            await tapCoordinate(driver, coordinates.draft.x, coordinates.draft.y, 'Drafts');
-        }
-        console.log('TikTok draft saved');
+        // No coordinate fallback: on the editor that spot is "Story 24h",
+        // which publishes a Story immediately.
+        await clickOne(driver, 'Drafts', [
+            '-ios predicate string:type == "XCUIElementTypeButton" AND label == "Drafts" AND visible == 1',
+        ]);
         await driver.pause(2500);
+        if (await onPublishForm(driver)) throw new Error('TikTok publish form is still open after tapping Drafts');
+        console.log('TikTok draft saved');
     }
 }
 
@@ -863,6 +994,7 @@ if (!reachedCaptionScreen || !driver) {
 }
 
 try {
+    await addTitle(driver, manifest.title);
     await addCaption(driver, tiktokCoordinates, manifest.caption);
     await tapPublishOrDraft(driver, deviceRemote, manifest.device.udid, tiktokCoordinates, manifest.destination);
 } finally {
