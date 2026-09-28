@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 import { resolveWdaBackend } from './host-mode.js';
@@ -6,22 +7,43 @@ import { resolveWdaBackend } from './host-mode.js';
 const execFileAsync = promisify(execFile);
 
 /**
- * iOS tears the CoreDeviceProxy tunnel down ~30 minutes after it is created,
- * taking the WDA XCTest session with it. phone-farm-tunnel.service rotates it
- * earlier (RuntimeMaxSec) so the cut happens on our schedule; keep in sync.
+ * The device drops the CoreDeviceProxy tunnel on a fixed ~30-minute cycle,
+ * anchored to the clock rather than to tunnel creation (observed on an
+ * iPhone XR / iOS 18.7: drops at :23 and :53 whatever the tunnel's age).
+ * The WDA XCTest session dies with it, so tasks are scheduled between drops.
  */
-export const TUNNEL_ROTATION_MS = 25 * 60_000;
+export const TUNNEL_DROP_PERIOD_MS = 30 * 60_000;
 const TUNNEL_UNIT = 'phone-farm-tunnel.service';
+const TUNNEL_DROPS_FILE = process.env.PHONE_FARM_TUNNEL_DROPS_FILE ?? '/var/lib/phone-farm/tunnel-drops';
 const MAX_REQUIRED_WINDOW_MS = 20 * 60_000;
 const WINDOW_MARGIN_MS = 2 * 60_000;
 
-/** How much tunnel lifetime a task needs before it may start on the current tunnel. */
+/** How much uninterrupted tunnel time a task needs before it may start. */
 export function requiredTunnelWindowMs(estimatedDurationMs: number): number {
     return Math.min(Math.max(estimatedDurationMs, 0) + WINDOW_MARGIN_MS, MAX_REQUIRED_WINDOW_MS);
 }
 
-export function tunnelWindowRemainingMs(startedAtMs: number, nowMs: number, rotationMs = TUNNEL_ROTATION_MS): number {
-    return startedAtMs + rotationMs - nowMs;
+/**
+ * Predict the next tunnel drop: one period after the last observed drop
+ * (stepping forward whole periods), and never later than one period after
+ * the current tunnel started.
+ */
+export function nextTunnelDropAt(tunnelStartedAtMs: number, lastDropMs: number | undefined, nowMs: number, periodMs = TUNNEL_DROP_PERIOD_MS): number {
+    const byAge = tunnelStartedAtMs + periodMs;
+    if (lastDropMs === undefined || lastDropMs > nowMs) return byAge;
+    const periods = Math.max(1, Math.ceil((nowMs - lastDropMs) / periodMs));
+    return Math.min(lastDropMs + periods * periodMs, byAge);
+}
+
+/** Last tunnel drop recorded by the watchdog (unix seconds per line), if any. */
+export async function lastTunnelDrop(): Promise<number | undefined> {
+    try {
+        const lines = (await readFile(TUNNEL_DROPS_FILE, 'utf8')).trim().split('\n');
+        const seconds = Number(lines.at(-1));
+        return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /** Parse `systemctl show --timestamp=unix` output ("@1790599996"); undefined when the unit is not active. */

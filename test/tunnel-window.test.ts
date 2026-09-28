@@ -1,22 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { requiredTunnelWindowMs, TUNNEL_ROTATION_MS, tunnelWindowRemainingMs } from '../src/devices/wda/tunnel-window.js';
+import { nextTunnelDropAt, requiredTunnelWindowMs, TUNNEL_DROP_PERIOD_MS } from '../src/devices/wda/tunnel-window.js';
 
-test('a Photo Mode post needs its estimate plus margin of tunnel lifetime', () => {
-    assert.equal(requiredTunnelWindowMs(8 * 60_000), 10 * 60_000);
+const MIN = 60_000;
+
+test('a Photo Mode post needs its estimate plus margin of tunnel time', () => {
+    assert.equal(requiredTunnelWindowMs(12 * MIN), 14 * MIN);
 });
 
-test('long tasks are capped so they can still start on a fresh tunnel', () => {
-    assert.equal(requiredTunnelWindowMs(60 * 60_000), 20 * 60_000);
-    assert.ok(requiredTunnelWindowMs(60 * 60_000) < TUNNEL_ROTATION_MS);
+test('long tasks are capped so they can still start between drops', () => {
+    assert.equal(requiredTunnelWindowMs(60 * MIN), 20 * MIN);
+    assert.ok(requiredTunnelWindowMs(60 * MIN) < TUNNEL_DROP_PERIOD_MS);
 });
 
-test('remaining tunnel window counts down to the scheduled rotation', () => {
-    const started = Date.UTC(2026, 8, 28, 12, 0, 0);
-    assert.equal(tunnelWindowRemainingMs(started, started), TUNNEL_ROTATION_MS);
-    assert.equal(tunnelWindowRemainingMs(started, started + 20 * 60_000), 5 * 60_000);
-    assert.ok(tunnelWindowRemainingMs(started, started + 26 * 60_000) < 0);
+test('the next drop follows the last observed drop on the fixed cycle', () => {
+    const drop = Date.UTC(2026, 8, 28, 14, 23, 0);
+    // A tunnel restarted right after the drop; the next drop is 30 minutes after it.
+    assert.equal(nextTunnelDropAt(drop + 30_000, drop, drop + 5 * MIN), drop + 30 * MIN);
+    // Several cycles later the prediction steps forward whole periods.
+    assert.equal(nextTunnelDropAt(drop + 60 * MIN + 30_000, drop, drop + 70 * MIN), drop + 90 * MIN);
+});
+
+test('a tunnel started mid-cycle is not trusted past the cycle drop', () => {
+    const drop = Date.UTC(2026, 8, 28, 15, 23, 0);
+    // Restarted manually at :48 — it still drops at :53, not at :18 next hour.
+    assert.equal(nextTunnelDropAt(drop + 25 * MIN, drop, drop + 26 * MIN), drop + 30 * MIN);
+});
+
+test('without an observed drop, assume one period after the tunnel started', () => {
+    const start = Date.UTC(2026, 8, 28, 12, 0, 0);
+    assert.equal(nextTunnelDropAt(start, undefined, start + MIN), start + TUNNEL_DROP_PERIOD_MS);
 });
 
 test('systemd unix timestamps parse; anything else is unknown', async () => {
@@ -28,6 +42,6 @@ test('systemd unix timestamps parse; anything else is unknown', async () => {
 
 test('job expiry covers the estimate plus a full tunnel wait', async () => {
     const { jobExpirySeconds } = await import('../src/scheduler/repository.js');
-    // 12-minute photo post: 720 + 600 slack + 1500 rotation + 90 settle.
-    assert.equal(jobExpirySeconds(12 * 60_000), 2910);
+    // 12-minute photo post: 720 + 600 slack + 1800 drop cycle + 90 settle.
+    assert.equal(jobExpirySeconds(12 * 60_000), 3210);
 });

@@ -7,7 +7,7 @@ import { discoverConnectedDevices, type Device } from '../devices/discovery.js';
 import { loadRegisteredDevices, type RegisteredDevice } from '../devices/registry.js';
 import { passcodeForDevice } from '../devices/secrets.js';
 import { WdaRemoteControl } from '../devices/wda-remote.js';
-import { requiredTunnelWindowMs, TUNNEL_SETTLE_MS, tunnelStartedAt, tunnelWindowRemainingMs } from '../devices/wda/tunnel-window.js';
+import { lastTunnelDrop, nextTunnelDropAt, requiredTunnelWindowMs, TUNNEL_SETTLE_MS, tunnelStartedAt } from '../devices/wda/tunnel-window.js';
 import type { ExecutionRow } from '../database/schema.js';
 import type { PluginRegistry } from '../registry.js';
 import type { TaskExecutionResult } from '../types.js';
@@ -46,14 +46,15 @@ async function waitForDevice(
             if (startedAt === undefined) {
                 lastProblem = 'RemoteXPC tunnel age is unknown (phone-farm-tunnel.service not active?)';
             } else {
-                const remaining = tunnelWindowRemainingMs(startedAt, Date.now());
-                const age = Date.now() - startedAt;
+                const now = Date.now();
+                const remaining = nextTunnelDropAt(startedAt, await lastTunnelDrop(), now) - now;
+                const age = now - startedAt;
                 if (age < TUNNEL_SETTLE_MS) {
                     lastProblem = `waiting for WDA to relaunch on the rotated RemoteXPC tunnel (${Math.round(age / 1000)}s old)`;
                 } else if (remaining >= requiredWindowMs) {
                     return device;
                 } else {
-                    lastProblem = `waiting for the RemoteXPC tunnel rotation (${Math.max(0, Math.round(remaining / 1000))}s left, task needs ${Math.round(requiredWindowMs / 1000)}s)`;
+                    lastProblem = `waiting for the next RemoteXPC tunnel drop to pass (${Math.max(0, Math.round(remaining / 1000))}s left, task needs ${Math.round(requiredWindowMs / 1000)}s)`;
                 }
             }
         }

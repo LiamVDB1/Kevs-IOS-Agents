@@ -13,15 +13,15 @@ import type { CreateTaskInput, JsonObject, PipelineClaim, ScheduleTiming, Stored
 import { ensureDeviceQueue, queueNameForDevice } from './queue.js';
 import { initialRunAt, latestDueOccurrence } from './recurrence.js';
 import { DEFAULT_MIN_SCHEDULE_GAP_MINUTES, estimatedTaskWindow, validateTaskInput, windowsTooClose } from './validation.js';
-import { TUNNEL_ROTATION_MS, TUNNEL_SETTLE_MS } from '../devices/wda/tunnel-window.js';
+import { TUNNEL_DROP_PERIOD_MS, TUNNEL_SETTLE_MS } from '../devices/wda/tunnel-window.js';
 
 /**
  * pg-boss expiry for an execution: its estimate, ten minutes of slack, and the
  * longest the executor may hold it for a fresh RemoteXPC tunnel before it
- * starts (a full rotation plus WDA relaunch). Never below pg-boss's default.
+ * starts (a full tunnel drop cycle plus WDA relaunch). Never below pg-boss's default.
  */
 export function jobExpirySeconds(estimatedDurationMs: number): number {
-    const tunnelWaitSeconds = Math.ceil((TUNNEL_ROTATION_MS + TUNNEL_SETTLE_MS) / 1000);
+    const tunnelWaitSeconds = Math.ceil((TUNNEL_DROP_PERIOD_MS + TUNNEL_SETTLE_MS) / 1000);
     return Math.max(900, Math.ceil(estimatedDurationMs / 1000) + 600 + tunnelWaitSeconds);
 }
 
