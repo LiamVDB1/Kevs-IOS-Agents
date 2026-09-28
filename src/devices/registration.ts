@@ -8,6 +8,7 @@ import { remote, type Browser } from 'webdriverio';
 
 import { switchTikTokAccount, tapCoordinate } from '../tiktok/actions.js';
 import { switchInstagramAccount } from '../instagram/actions.js';
+import { resolveDeveloperDir } from './wda/xcode-env.js';
 import { coordinateProfiles, coordinatesForProfile, profileForProductType, type CoordinateProfile } from './coordinates.js';
 import { discoverConnectedDevices, type Device } from './discovery.js';
 import { loadRegisteredDevices, mutateRegisteredDevices, type RegisteredDevice } from './registry.js';
@@ -332,7 +333,7 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
             if (backend === 'xcode') {
                 await Promise.all([
                     access(driverProject),
-                    access(process.env.XCODE_DEVELOPER_DIR ?? '/Applications/Xcode_26.2.app/Contents/Developer'),
+                    access(resolveDeveloperDir()),
                 ]);
                 session.checks.host = check('passed', 'Xcode, XCUITest, and WebDriverAgent are available');
             } else {

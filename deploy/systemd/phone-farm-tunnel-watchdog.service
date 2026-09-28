@@ -1,0 +1,8 @@
+[Unit]
+Description=Phone Farm RemoteXPC tunnel liveness check
+After=phone-farm-tunnel.service
+
+[Service]
+Type=oneshot
+# The tunnel process can stay alive after the device side stops passing traffic.
+ExecStart=/usr/bin/python3 /usr/local/libexec/phone-farm-tunnel-watchdog.py

@@ -1,19 +1,40 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+
+const BACKGROUNDING_APP = 'com.apple.Preferences';
 
 export interface RemoteXpcPortForwarder {
     start(): Promise<void>;
     stop(): Promise<void>;
 }
 
+/** A live XCTest session hosting WDA; closing it ends the session and the runner. */
+export interface RemoteXpcRunnerSession {
+    close(): Promise<void>;
+}
+
 export interface RemoteXpcWdaRuntime {
     createPortForwarder(localPort: number, devicePort: number, udid: string): Promise<RemoteXpcPortForwarder>;
-    launchRunner(udid: string, bundleId: string, environment: Record<string, string>): Promise<void>;
+    launchRunner(udid: string, bundleId: string, environment: Record<string, string>): Promise<RemoteXpcRunnerSession | void>;
     terminateRunner(udid: string, bundleId: string): Promise<void>;
 }
 
+type RemoteXpcXcTestRunner = {
+    setupAndLaunch(): Promise<void>;
+    close(): Promise<void>;
+};
+
 type RemoteXpcModule = {
+    createXCTestRunner(options: {
+        udid: string;
+        testRunnerBundleId: string;
+        xctestBundleId: string;
+        appUnderTestBundleId: string;
+        launchEnvironment: Record<string, string>;
+        killExisting: boolean;
+    }): RemoteXpcXcTestRunner;
     DevicePortForwarder: new (
         localPort: number,
         devicePort: number,
@@ -71,18 +92,36 @@ export const defaultRemoteXpcWdaRuntime: RemoteXpcWdaRuntime = {
             fallbackConnector: () => remoteXpc.connectViaUsbmux(udid, devicePort),
         });
     },
+    // A plain process launch starts the runner app without a testmanagerd test
+    // session, so the WDA test never runs and :8100 never opens. Open the same
+    // XCTest session Xcode would and keep it alive for as long as WDA serves.
     async launchRunner(udid, bundleId, environment) {
         const remoteXpc = await loadRemoteXpcModule();
-        const dvt = await remoteXpc.Services.startDVTService(udid);
+        const runner = remoteXpc.createXCTestRunner({
+            udid,
+            testRunnerBundleId: bundleId,
+            xctestBundleId: bundleId.replace(/\.xctrunner$/, ''),
+            appUnderTestBundleId: bundleId,
+            launchEnvironment: environment,
+            killExisting: true,
+        });
         try {
-            await dvt.processControl.launch({
-                bundleId,
-                environment,
-                killExisting: true,
-            });
-        } finally {
-            await dvt.dvtService.close();
+            await runner.setupAndLaunch();
+            // With the Xcode 27 test stack the runner no longer backgrounds
+            // itself and XCTest aborts after 30s ("Failed to background test
+            // runner"). Foregrounding any other app satisfies that wait.
+            await delay(3_000);
+            const dvt = await remoteXpc.Services.startDVTService(udid);
+            try {
+                await dvt.processControl.launch({ bundleId: BACKGROUNDING_APP, environment: {}, killExisting: false });
+            } finally {
+                await dvt.dvtService.close();
+            }
+        } catch (error) {
+            await runner.close().catch(() => undefined);
+            throw error;
         }
+        return { close: () => runner.close() };
     },
     async terminateRunner(udid, bundleId) {
         const remoteXpc = await loadRemoteXpcModule();
@@ -99,6 +138,7 @@ export const defaultRemoteXpcWdaRuntime: RemoteXpcWdaRuntime = {
 export class RemoteXpcWdaSupervisor {
     private wdaForwarder?: RemoteXpcPortForwarder;
     private mjpegForwarder?: RemoteXpcPortForwarder;
+    private session?: RemoteXpcRunnerSession;
     private started = false;
 
     constructor(private readonly options: {
@@ -128,11 +168,11 @@ export class RemoteXpcWdaSupervisor {
         try {
             await this.wdaForwarder.start();
             await this.mjpegForwarder.start();
-            await runtime.launchRunner(
+            this.session = await runtime.launchRunner(
                 this.options.udid,
                 this.options.runnerBundleId,
                 this.options.launchEnvironment,
-            );
+            ) ?? undefined;
             this.started = true;
         } catch (error) {
             await this.stopForwarders();
@@ -142,7 +182,11 @@ export class RemoteXpcWdaSupervisor {
 
     async stop(): Promise<void> {
         const runtime = this.options.runtime ?? defaultRemoteXpcWdaRuntime;
-        if (this.started) {
+        const session = this.session;
+        this.session = undefined;
+        if (session) {
+            await session.close().catch(() => undefined);
+        } else if (this.started) {
             await runtime.terminateRunner(this.options.udid, this.options.runnerBundleId).catch(() => undefined);
         }
         this.started = false;

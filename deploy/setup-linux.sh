@@ -73,7 +73,12 @@ for service in tunnel appium wda worker web; do
     "$source_file" | sudo tee "$target_file" >/dev/null
   sudo chmod 0644 "$target_file"
 done
+sudo install -o root -g root -m 0755 deploy/remotexpc-tunnel-watchdog.py /usr/local/libexec/phone-farm-tunnel-watchdog.py
+for unit in phone-farm-tunnel-watchdog.service phone-farm-tunnel-watchdog.timer; do
+  sudo install -o root -g root -m 0644 "deploy/systemd/${unit}" "/etc/systemd/system/${unit}"
+done
 sudo systemctl daemon-reload
+sudo systemctl enable --now phone-farm-tunnel-watchdog.timer
 sudo systemctl enable --now \
   phone-farm-tunnel.service \
   phone-farm-appium.service \

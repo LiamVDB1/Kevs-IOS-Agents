@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { resolveDeveloperDir } from './xcode-env.js';
 import { resolveBuildTargets } from './target-device.js';
 
+const SUPPORTED_WDA_VERSION = '16.12.8';
+
 function required(name: string): string {
     const value = process.env[name];
     if (!value) {
@@ -42,12 +44,20 @@ const runnerInfoPlistPath = path.join(wdaRoot, 'WebDriverAgentRunner/Info.plist'
 const customCommandsPath = path.join(wdaRoot, 'WebDriverAgentLib/Commands/FBCustomCommands.m');
 const patchPath = path.join(
     packageRoot,
-    'Patches/appium-webdriveragent-8.9.1-absolute-touch.patch',
+    `Patches/appium-webdriveragent-${SUPPORTED_WDA_VERSION}-absolute-touch.patch`,
 );
 const buttonsPatchPath = path.join(
     packageRoot,
-    'Patches/appium-webdriveragent-8.9.1-sessionless-buttons.patch',
+    `Patches/appium-webdriveragent-${SUPPORTED_WDA_VERSION}-sessionless-buttons.patch`,
 );
+
+// The patches carry context and are version-specific: refuse to patch a
+// different WDA rather than let hunks land in the wrong place.
+const wdaVersion = (JSON.parse(await readFile(path.join(wdaRoot, 'package.json'), 'utf8')) as { version: string }).version;
+if (wdaVersion !== SUPPORTED_WDA_VERSION) {
+    throw new Error(`WDA patches target appium-webdriveragent ${SUPPORTED_WDA_VERSION}, but ${wdaVersion} is installed. `
+        + 'Run npm run appium:install-driver, or port Patches/ to the installed version.');
+}
 
 await Promise.all([
     access(projectPath), access(touchCommandsPath), access(runnerInfoPlistPath), access(customCommandsPath),
