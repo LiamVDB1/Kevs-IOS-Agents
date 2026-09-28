@@ -530,7 +530,8 @@ function createPhotoPostTask(configuration: TikTokPluginConfiguration): TaskDefi
             };
         },
         summarize: (payload) => `Photo Mode · ${payload.destination} · ${payload.media.length} image${payload.media.length === 1 ? '' : 's'}`,
-        estimateDurationMs: () => 8 * 60_000,
+        // Measured on an iPhone XR: ~6 min clean, ~10 min with one recovery retry.
+        estimateDurationMs: () => 12 * 60_000,
         retryPolicy: () => ({ retryLimit: 0, retryDelaySeconds: 0, retryBackoff: false }),
         supportsStop: () => true,
         async execute(context: TaskExecutionContext, payload) {

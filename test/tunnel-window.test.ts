@@ -18,3 +18,16 @@ test('remaining tunnel window counts down to the scheduled rotation', () => {
     assert.equal(tunnelWindowRemainingMs(started, started + 20 * 60_000), 5 * 60_000);
     assert.ok(tunnelWindowRemainingMs(started, started + 26 * 60_000) < 0);
 });
+
+test('systemd unix timestamps parse; anything else is unknown', async () => {
+    const { parseUnixTimestamp } = await import('../src/devices/wda/tunnel-window.js');
+    assert.equal(parseUnixTimestamp('@1790599996\n'), 1_790_599_996_000);
+    assert.equal(parseUnixTimestamp('Mon 2026-09-28 14:53:16 CEST'), undefined);
+    assert.equal(parseUnixTimestamp(''), undefined);
+});
+
+test('job expiry covers the estimate plus a full tunnel wait', async () => {
+    const { jobExpirySeconds } = await import('../src/scheduler/repository.js');
+    // 12-minute photo post: 720 + 600 slack + 1500 rotation + 90 settle.
+    assert.equal(jobExpirySeconds(12 * 60_000), 2910);
+});

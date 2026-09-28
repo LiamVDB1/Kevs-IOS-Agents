@@ -13,6 +13,17 @@ import type { CreateTaskInput, JsonObject, PipelineClaim, ScheduleTiming, Stored
 import { ensureDeviceQueue, queueNameForDevice } from './queue.js';
 import { initialRunAt, latestDueOccurrence } from './recurrence.js';
 import { DEFAULT_MIN_SCHEDULE_GAP_MINUTES, estimatedTaskWindow, validateTaskInput, windowsTooClose } from './validation.js';
+import { TUNNEL_ROTATION_MS, TUNNEL_SETTLE_MS } from '../devices/wda/tunnel-window.js';
+
+/**
+ * pg-boss expiry for an execution: its estimate, ten minutes of slack, and the
+ * longest the executor may hold it for a fresh RemoteXPC tunnel before it
+ * starts (a full rotation plus WDA relaunch). Never below pg-boss's default.
+ */
+export function jobExpirySeconds(estimatedDurationMs: number): number {
+    const tunnelWaitSeconds = Math.ceil((TUNNEL_ROTATION_MS + TUNNEL_SETTLE_MS) / 1000);
+    return Math.max(900, Math.ceil(estimatedDurationMs / 1000) + 600 + tunnelWaitSeconds);
+}
 
 export interface ExecutionDetail extends ExecutionRow { logs: string[] }
 
@@ -227,7 +238,7 @@ export class SchedulerRepository {
                 const queueJobId = await this.boss.send(queueNameForDevice(row.device_udid), { executionId: execution.id }, {
                     db: fromDrizzle(tx, sql), retryLimit: policy.retryLimit,
                     retryDelay: policy.retryDelaySeconds, retryBackoff: policy.retryBackoff,
-                    expireInSeconds: Math.max(900, Math.ceil(definition.estimateDurationMs(task.payload) / 1000) + 600),
+                    expireInSeconds: jobExpirySeconds(definition.estimateDurationMs(task.payload)),
                 });
                 if (!queueJobId) throw new Error('Queue rejected an execution job');
                 await tx.update(executions).set({ queueJobId }).where(eq(executions.id, execution.id));
@@ -363,7 +374,7 @@ export class SchedulerRepository {
                 retryDelay: policy.retryDelaySeconds, retryBackoff: policy.retryBackoff,
                 // Match materializeDue — a retried multi-hour task must not be
                 // expired by pg-boss's ~15-minute default while it's still running.
-                expireInSeconds: Math.max(900, Math.ceil(definition.estimateDurationMs(source.payload) / 1000) + 600),
+                expireInSeconds: jobExpirySeconds(definition.estimateDurationMs(source.payload)),
             });
             if (!jobId) throw new Error('Unable to enqueue retry execution');
             await tx.update(executions).set({ queueJobId: jobId }).where(eq(executions.id, created.id));
@@ -521,7 +532,7 @@ export class SchedulerRepository {
             retryLimit: policy.retryLimit,
             retryDelay: policy.retryDelaySeconds,
             retryBackoff: policy.retryBackoff,
-            expireInSeconds: Math.max(900, Math.ceil(definition.estimateDurationMs(execution.payload) / 1000) + 600),
+            expireInSeconds: jobExpirySeconds(definition.estimateDurationMs(execution.payload)),
         });
         if (!queueJobId) throw new Error(`Queue rejected requeue for ${execution.id}`);
         await this.connection.db.update(executions).set({

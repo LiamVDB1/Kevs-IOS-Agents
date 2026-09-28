@@ -12,8 +12,9 @@ import { coordinateProfile, registeredAccounts } from './runtime-settings.js';
 import { switchTikTokAccount, tapCoordinate, typeText } from './actions.js';
 import { recentPickerTargets } from './post-layout.js';
 import { isRedCheckboxChecked } from './pixel.js';
-import { matchPickerCellToVideo, matchPickerCellsToImages, filterCellsByDurationBadge } from './post-picker-match.js';
+import { matchPickerCellToVideo, filterCellsByDurationBadge, scoreCellsAgainstImages, verifyExpectedAssignment } from './post-picker-match.js';
 import { recognizeWords } from './ocr.js';
+import { TUNNEL_SETTLE_MS, tunnelStartedAt } from '../devices/wda/tunnel-window.js';
 
 const execFileAsync = promisify(execFile);
 const POST_DEBUG_DIR = path.resolve('.wda', 'post-debug');
@@ -135,6 +136,27 @@ async function listPickerCells(driver: Browser): Promise<PickerCellInfo[]> {
     }
     listed.sort((a, b) => (a.y - b.y) || (a.x - b.x));
     return listed;
+}
+
+/**
+ * Media cells of the main picker grid: de-duplicated, without camera tiles
+ * and without the smaller thumbnails of the selection tray.
+ */
+function pickerGridCells(cells: PickerCellInfo[]): PickerCellInfo[] {
+    const seen = new Set<string>();
+    const media = cells
+        .filter((cell) => !isCameraOrUtilityCell(cell.label, cell.name))
+        .filter((cell) => {
+            const key = [cell.x, cell.y, cell.width, cell.height].map(Math.round).join(',');
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    if (!media.length) return media;
+    const sizes = media.map((cell) => cell.width).sort((a, b) => a - b);
+    const typical = sizes[Math.floor(sizes.length / 2)]!;
+    return media.filter((cell) => Math.abs(cell.width - typical) <= typical * 0.15
+        && Math.abs(cell.height - typical) <= typical * 0.15);
 }
 
 function pickMediaCells(
@@ -583,25 +605,55 @@ async function chooseRecentMedia(
             y: coordinates.selectMultiple.y,
         }, 'Select multiple', true);
         const { scale } = await remote.getScreenInfo(udid);
-        const selected = new Set<number>();
+        // The imports are the newest cells: the end of the Recents grid, in
+        // import order. importMedia imports in reverse, so files[k] sits at
+        // newest[count - 1 - k]. Position decides; the visual check only
+        // confirms it, and any disagreement aborts instead of guessing.
+        const expectedCell = files.map((_, index) => count - 1 - index);
+        // Record the newest cells once, before anything is picked. After the
+        // first pick the tray appears, the grid scrolls up a row, and TikTok
+        // renumbers (and partly drops) its accessibility cells — only the
+        // grid's vertical offset stays trustworthy, so track that instead.
+        const initialGrid = pickerGridCells(await listPickerCells(driver));
+        if (initialGrid.length < count) {
+            throw new Error(`Only ${initialGrid.length} picker cells are visible for ${count} imported Photo Mode images`);
+        }
+        const newest = initialGrid.slice(-count);
+        const initialBottom = Math.max(...initialGrid.map((cell) => cell.y));
         for (const [selection, file] of files.entries()) {
-            // The grid shifts once the selection tray appears, so re-read cell
-            // frames and re-match against a fresh screenshot for every image.
-            const pool = (await listPickerCells(driver))
-                .filter((cell) => !isCameraOrUtilityCell(cell.label, cell.name) && !selected.has(cell.index));
-            const [match] = await matchPickerCellsToImages(
+            const grid = selection === 0 ? initialGrid : pickerGridCells(await listPickerCells(driver));
+            const shift = grid.length ? Math.max(...grid.map((cell) => cell.y)) - initialBottom : 0;
+            const targets = newest.map((cell) => ({ index: cell.index, x: cell.x, y: cell.y + shift, width: cell.width, height: cell.height }));
+            await savePostDebugScreenshot(remote, udid, `photo-pick-${selection + 1}`);
+            console.log(`Photo pick ${selection + 1}: grid shift ${Math.round(shift)}; targets `
+                + targets.map((cell) => `(${Math.round(cell.x)},${Math.round(cell.y)})`).join(' '));
+            if (targets.some((cell) => cell.y < 0)) {
+                throw new Error('Imported Photo Mode images scrolled out of view in the TikTok picker');
+            }
+            const scores = await scoreCellsAgainstImages(
                 await remote.getScreenshot(udid),
                 scale,
-                pool.map((cell) => ({ index: cell.index, x: cell.x, y: cell.y, width: cell.width, height: cell.height })),
-                [file.path],
+                targets,
+                files.map(({ path: filePath }) => filePath),
             );
-            if (!match) throw new Error(`Could not match Photo Mode image ${selection + 1}/${count}`);
-            selected.add(match.cell.index);
+            // Picked thumbnails are dimmed and badged, so only the images still
+            // to pick are verified, against their own unpicked cells.
+            const remainingImages = expectedCell.map((_, image) => image).filter((image) => image >= selection);
+            const remainingCells = remainingImages.map((image) => expectedCell[image]!);
+            const problem = verifyExpectedAssignment(
+                remainingImages.map((image) => remainingCells.map((cell) => scores[image]![cell]!)),
+                remainingImages.map((_, index) => index),
+            );
+            if (problem) {
+                throw new Error(`Imported slides are not the newest picker cells in import order (${problem})`);
+            }
+            const cell = targets[expectedCell[selection]!]!;
             await tapCoordinate(
                 driver,
-                Math.round(match.cell.x + match.cell.width - 18),
-                Math.round(match.cell.y + 16),
-                `Photo Mode media ${selection + 1}/${count} selection circle (visual score ${match.score.toFixed(1)})`,
+                Math.round(cell.x + cell.width - 18),
+                Math.round(cell.y + 16),
+                `Photo Mode media ${selection + 1}/${count} (${file.name}) selection circle, `
+                    + `score ${scores[selection]![expectedCell[selection]!]!.toFixed(1)}`,
             );
             await driver.pause(900);
         }
@@ -924,6 +976,21 @@ if (process.env.WDA_URL) {
 // Post/Drafts tap are NOT retried: retrying after that risks a duplicate
 // post or draft, which is worse than a single clean failure.
 const REACH_CAPTION_SCREEN_ATTEMPTS = 3;
+const WDA_RECOVERY_TIMEOUT_MS = 4 * 60_000;
+
+async function waitForWdaRecovery(): Promise<void> {
+    const wdaUrl = process.env.WDA_URL ?? 'http://127.0.0.1:8100';
+    const deadline = Date.now() + WDA_RECOVERY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        const startedAt = await tunnelStartedAt();
+        const settled = startedAt === null || (startedAt !== undefined && Date.now() - startedAt >= TUNNEL_SETTLE_MS);
+        const ready = await fetch(`${wdaUrl}/status`, { signal: AbortSignal.timeout(3_000) })
+            .then((response) => response.ok, () => false);
+        if (settled && ready) return;
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+    console.log('WDA did not recover within 4 minutes; retrying anyway');
+}
 let driver: Browser | undefined;
 let reachedCaptionScreen = false;
 let lastAttemptError: unknown;
@@ -931,6 +998,9 @@ let lastAttemptError: unknown;
 for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptionScreen; attempt += 1) {
     if (attempt > 1) {
         console.log(`Retrying up to the caption screen (attempt ${attempt}/${REACH_CAPTION_SCREEN_ATTEMPTS})`);
+        // A RemoteXPC tunnel drop takes WDA down for a minute or two; wait for
+        // it to come back on a settled tunnel instead of burning the retries.
+        await waitForWdaRecovery();
     }
     try {
         driver = await remote({ hostname: process.env.APPIUM_HOST ?? '127.0.0.1', port: positiveInteger('APPIUM_PORT', 4725), path: '/', logLevel: 'info', connectionRetryCount: 0, connectionRetryTimeout: 180000, capabilities });

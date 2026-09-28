@@ -7,6 +7,7 @@ import { diagnoseWdaLaunchFailure, wdaUnavailableTooLong } from './diagnostics.j
 import { resolveDeveloperDir } from './xcode-env.js';
 import { resolveWdaBackend, resolveWdaRunnerBundleId, remoteXpcLaunchEnvironment } from './host-mode.js';
 import { RemoteXpcWdaSupervisor } from './remotexpc.js';
+import { tunnelIdentity } from './tunnel-window.js';
 import { resolveTargetUdid } from './target-device.js';
 
 function required(name: string): string {
@@ -132,6 +133,14 @@ let forwarding = false;
 let stopping = false;
 let locked = false;
 let startedAt = 0;
+/** RemoteXPC tunnel the running WDA XCTest session was launched through. */
+let launchedTunnel: string | undefined;
+
+/** True only for a different registered tunnel; a failed or empty lookup is not a rotation. */
+async function tunnelRotated(launched: string): Promise<boolean> {
+    const current = await tunnelIdentity(udid);
+    return current !== undefined && current !== launched;
+}
 let lastReadyAt: number | undefined;
 let failures = 0;
 let retryAt = 0;
@@ -205,6 +214,7 @@ async function startRunner(): Promise<void> {
             }),
         });
         remoteSupervisor = supervisor;
+        launchedTunnel = await tunnelIdentity(udid);
         try {
             await supervisor.start();
         } catch (error) {
@@ -284,6 +294,14 @@ while (!stopping) {
         failures = 0;
         retryAt = 0;
         report('disconnected', 'Reconnect the USB cable');
+    } else if (runnerStarted() && backend === 'remotexpc' && launchedTunnel !== undefined
+        && await tunnelRotated(launchedTunnel)) {
+        // The tunnel rotated: WDA's /status may still answer, but its XCTest
+        // authorization died with the old tunnel ("Not authorized for
+        // performing UI testing actions"). Relaunch on the new tunnel now.
+        report('connecting', 'RemoteXPC tunnel rotated; relaunching WDA on the new tunnel');
+        await stopRunner();
+        retryAt = 0;
     } else if (runnerStarted()) {
         if (await wdaReady()) {
             failures = 0;

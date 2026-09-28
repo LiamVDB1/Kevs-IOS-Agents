@@ -345,3 +345,76 @@ export async function writeMatchDebugFrame(videoPath: string, outPath: string): 
     const [frame] = await extractVideoFrames(videoPath);
     if (frame) await writeFile(outPath, frame);
 }
+
+const VERIFY_SAMPLE_SIZE = 48;
+/** Inner fraction of a square thumbnail compared — skips the selection circle and badge. */
+const VERIFY_INSET = 0.18;
+
+async function sampleGray(buffer: Buffer): Promise<Buffer> {
+    const { data } = await sharp(buffer)
+        .resize(VERIFY_SAMPLE_SIZE, VERIFY_SAMPLE_SIZE, { fit: 'fill' })
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+    return data;
+}
+
+/** The centre square TikTok shows as a grid thumbnail, minus the same inset used for cells. */
+async function thumbnailRegionOfImage(imagePath: string): Promise<Buffer> {
+    const image = sharp(await readFile(imagePath));
+    const { width = 0, height = 0 } = await image.metadata();
+    const side = Math.min(width, height);
+    const inset = Math.round(side * VERIFY_INSET);
+    return image.extract({
+        left: Math.round((width - side) / 2) + inset,
+        top: Math.round((height - side) / 2) + inset,
+        width: side - 2 * inset,
+        height: side - 2 * inset,
+    }).toBuffer();
+}
+
+/**
+ * Score every (image, cell) pair; lower is more similar. Cells are square
+ * picker thumbnails; images are the source files the automation imported.
+ */
+export async function scoreCellsAgainstImages(
+    screenshot: Buffer,
+    scale: number,
+    cells: PickerMatchCell[],
+    imagePaths: string[],
+): Promise<number[][]> {
+    const cellSamples = await Promise.all(cells.map(async (cell) => {
+        const side = Math.min(cell.width, cell.height) * scale;
+        const inset = Math.round(side * VERIFY_INSET);
+        return sampleGray(await sharp(screenshot).extract({
+            left: Math.round(cell.x * scale) + inset,
+            top: Math.round(cell.y * scale) + inset,
+            width: Math.round(side) - 2 * inset,
+            height: Math.round(side) - 2 * inset,
+        }).toBuffer());
+    }));
+    const imageSamples = await Promise.all(imagePaths.map(async (imagePath) => sampleGray(await thumbnailRegionOfImage(imagePath))));
+    return imageSamples.map((image) => cellSamples.map((cell) => meanAbsDiff(image, cell)));
+}
+
+/** Minimum score gap between an image's expected cell and its next-best cell. */
+export const ORDER_VERIFY_MIN_GAP = 4;
+
+/**
+ * Verify that image k sits in expectedCell[k]: that cell must be image k's
+ * best match and image k must be that cell's best match, each by a margin.
+ * Returns a description of the first violation, or undefined when verified.
+ */
+export function verifyExpectedAssignment(scores: number[][], expectedCell: number[]): string | undefined {
+    for (const [image, cell] of expectedCell.entries()) {
+        const row = scores[image]!;
+        const own = row[cell]!;
+        const otherCells = row.filter((_, index) => index !== cell);
+        const otherImages = scores.filter((_, index) => index !== image).map((other) => other[cell]!);
+        const nearest = Math.min(...otherCells, ...otherImages, Number.POSITIVE_INFINITY);
+        if (!(nearest - own >= ORDER_VERIFY_MIN_GAP)) {
+            return `image ${image + 1}: expected cell score ${own.toFixed(1)}, nearest alternative ${nearest.toFixed(1)}`;
+        }
+    }
+    return undefined;
+}

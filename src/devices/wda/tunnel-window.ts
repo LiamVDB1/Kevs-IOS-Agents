@@ -24,13 +24,48 @@ export function tunnelWindowRemainingMs(startedAtMs: number, nowMs: number, rota
     return startedAtMs + rotationMs - nowMs;
 }
 
-/** When the running tunnel started, or undefined when no systemd-managed RemoteXPC tunnel applies. */
-export async function tunnelStartedAt(): Promise<number | undefined> {
-    if (process.platform !== 'linux' || resolveWdaBackend() !== 'remotexpc') return undefined;
+/** Parse `systemctl show --timestamp=unix` output ("@1790599996"); undefined when the unit is not active. */
+export function parseUnixTimestamp(value: string): number | undefined {
+    const match = /^@(\d+)$/.exec(value.trim());
+    return match ? Number(match[1]) * 1000 : undefined;
+}
+
+/**
+ * When the running tunnel started. Returns null when no systemd-managed
+ * RemoteXPC tunnel applies (macOS / Xcode backend), and undefined when it
+ * applies but its age cannot be read — callers must treat that as "unknown",
+ * never as "plenty of time left".
+ */
+export async function tunnelStartedAt(): Promise<number | null | undefined> {
+    if (process.platform !== 'linux' || resolveWdaBackend() !== 'remotexpc') return null;
     try {
-        const { stdout } = await execFileAsync('systemctl', ['show', TUNNEL_UNIT, '-p', 'ActiveEnterTimestamp', '--value'], { timeout: 5_000 });
-        const startedAt = Date.parse(stdout.trim());
-        return Number.isFinite(startedAt) ? startedAt : undefined;
+        const { stdout } = await execFileAsync(
+            'systemctl',
+            ['show', TUNNEL_UNIT, '-p', 'ActiveEnterTimestamp', '--value', '--timestamp=unix'],
+            { timeout: 5_000 },
+        );
+        return parseUnixTimestamp(stdout);
+    } catch {
+        return undefined;
+    }
+}
+
+/** A task may only start once WDA has had time to relaunch on a freshly rotated tunnel. */
+export const TUNNEL_SETTLE_MS = 90_000;
+
+const TUNNEL_REGISTRY_URL = process.env.REMOTEXPC_TUNNEL_REGISTRY_URL ?? 'http://127.0.0.1:42314/remotexpc/tunnels';
+
+/**
+ * Identity of the device's current RemoteXPC tunnel ("address:rsdPort"), or
+ * undefined when none is registered. A new identity means the XCTest session
+ * WDA runs in belongs to a dead tunnel, even if WDA's /status still answers.
+ */
+export async function tunnelIdentity(udid: string): Promise<string | undefined> {
+    try {
+        const response = await fetch(TUNNEL_REGISTRY_URL, { signal: AbortSignal.timeout(3_000) });
+        const body = await response.json() as { tunnels?: Record<string, { udid?: string; address?: string; rsdPort?: number }> };
+        const tunnel = Object.values(body.tunnels ?? {}).find((entry) => entry.udid === udid);
+        return tunnel?.address && tunnel.rsdPort ? `${tunnel.address}:${tunnel.rsdPort}` : undefined;
     } catch {
         return undefined;
     }
