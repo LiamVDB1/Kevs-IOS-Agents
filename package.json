@@ -45,7 +45,8 @@
     "preweb": "npm run build:web",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "queue:run": "node --env-file-if-exists=.env --import tsx src/tiktok/queue-runner.ts"
   },
   "engines": {
     "node": ">=22"

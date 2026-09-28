@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the Assayist phone queue every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

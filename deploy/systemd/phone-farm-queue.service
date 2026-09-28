@@ -1,0 +1,16 @@
+[Unit]
+Description=Phone Farm Assayist queue runner (post due items, write posted.json)
+After=network-online.target phone-farm-web.service phone-farm-worker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__REPO__
+Environment=HOME=__HOME__
+Environment=PATH=__NODE_BIN__:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-__REPO__/.env
+ExecStart=__NODE_BIN__/npm run -s queue:run
+# A post can wait for a tunnel window and take ~15 minutes; the receipt
+# search adds up to 20. The timer never starts a second run while one is active.
+TimeoutStartSec=2h

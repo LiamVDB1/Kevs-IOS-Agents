@@ -61,7 +61,7 @@ step "Linux host preflight"
 npm run linux:preflight
 
 step "systemd services"
-for service in tunnel appium wda worker web; do
+for service in tunnel appium wda worker web queue; do
   source_file="deploy/systemd/phone-farm-${service}.service"
   target_file="/etc/systemd/system/phone-farm-${service}.service"
   sudo sed \
@@ -80,6 +80,8 @@ for unit in phone-farm-tunnel-watchdog.service phone-farm-tunnel-watchdog.timer;
 done
 sudo systemctl daemon-reload
 sudo systemctl enable --now phone-farm-tunnel-watchdog.timer
+sudo install -o root -g root -m 0644 deploy/systemd/phone-farm-queue.timer /etc/systemd/system/phone-farm-queue.timer
+# The queue timer posts publicly; enable it deliberately: sudo systemctl enable --now phone-farm-queue.timer
 sudo systemctl enable --now \
   phone-farm-tunnel.service \
   phone-farm-appium.service \

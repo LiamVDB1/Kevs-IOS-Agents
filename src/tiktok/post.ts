@@ -868,6 +868,13 @@ async function addCaption(driver: Browser, coordinates: TikTokCoordinates['tikto
     }
 
     await driver.pause(400);
+    if (/[#@][^\s#@]+$/.test(caption)) {
+        // A trailing hashtag/mention leaves TikTok in suggestion mode, which
+        // hides the # @ row (and the collapse icon). A space ends the token;
+        // TikTok trims trailing whitespace from the caption.
+        await driver.keys([' ']);
+        await driver.pause(800);
+    }
     if (coordinates.captionCollapse) {
         // Leave the full-screen description editor through its collapse icon
         // while the keyboard still pins it in place; tapPublishOrDraft then
