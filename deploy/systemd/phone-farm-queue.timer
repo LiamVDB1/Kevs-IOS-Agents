@@ -2,8 +2,9 @@
 Description=Check the Assayist phone queue every 10 minutes
 
 [Timer]
-OnBootSec=5min
-OnUnitInactiveSec=10min
+# A run already in progress (a post can take ~30 minutes) is never doubled:
+# systemd does not start a oneshot service that is still active.
+OnCalendar=*:0/10
 Persistent=false
 
 [Install]
