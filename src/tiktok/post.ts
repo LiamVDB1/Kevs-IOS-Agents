@@ -16,7 +16,8 @@ import { isRedCheckboxChecked } from './pixel.js';
 import { matchPickerCellToVideo, filterCellsByDurationBadge, scoreCellsAgainstImages, verifyExpectedAssignment } from './post-picker-match.js';
 import { recognizeWords } from './ocr.js';
 import {
-    canReuseImport, firstDisplayedWithin, mediaFingerprint, thermalLabel, THERMAL_CRITICAL, THERMAL_SERIOUS,
+    canReuseImport,
+    firstDisplayedWithin, lockAfterRun, mediaFingerprint, thermalLabel, THERMAL_CRITICAL, THERMAL_SERIOUS,
     type ImportMarker,
 } from './post-guards.js';
 import { TUNNEL_SETTLE_MS, tunnelStartedAt } from '../devices/wda/tunnel-window.js';
@@ -1059,125 +1060,137 @@ const deviceRemote = new WdaRemoteControl({
 console.log('Checking device lock state');
 await deviceRemote.unlock(manifest.device.udid);
 
-await waitForSafeThermals();
-const assetCount = await importMediaOnce(manifest);
+// A run that ends with the screen on leaves it on all day, which keeps the phone warm. After a
+// publish TikTok is still uploading in the foreground, so the lock waits a minute longer.
+const LOCK_AFTER_PUBLISH_MS = 60_000;
+let published = false;
+try {
+    await waitForSafeThermals();
+    const assetCount = await importMediaOnce(manifest);
 
-const bundleId = process.env.TIKTOK_BUNDLE_ID ?? 'com.zhiliaoapp.musically';
-const capabilities: WebdriverIO.Capabilities & Record<string, unknown> = {
-    platformName: 'iOS', 'appium:automationName': 'XCUITest', 'appium:udid': manifest.device.udid,
-    'appium:bundleId': bundleId, 'appium:noReset': true, 'appium:forceAppLaunch': true,
-    'appium:shouldTerminateApp': true, 'appium:newCommandTimeout': 180,
-    'appium:waitForIdleTimeout': 0,
-};
-if (process.env.WDA_URL) {
-    capabilities['appium:webDriverAgentUrl'] = process.env.WDA_URL;
-    capabilities['appium:wdaRemotePort'] = positiveInteger('WDA_REMOTE_PORT', 8100);
-}
-
-// The composer/picker flow (up to the caption screen) is the fragile part —
-// flaky picker checkboxes, transient tooltips, TikTok UI timing — so it gets
-// retried with a fresh app relaunch on failure. Caption entry and the final
-// Post/Drafts tap are NOT retried: retrying after that risks a duplicate
-// post or draft, which is worse than a single clean failure.
-const REACH_CAPTION_SCREEN_ATTEMPTS = 3;
-const WDA_RECOVERY_TIMEOUT_MS = 4 * 60_000;
-
-async function waitForWdaRecovery(): Promise<void> {
-    const wdaUrl = process.env.WDA_URL ?? 'http://127.0.0.1:8100';
-    const deadline = Date.now() + WDA_RECOVERY_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-        const startedAt = await tunnelStartedAt();
-        const settled = startedAt === null || (startedAt !== undefined && Date.now() - startedAt >= TUNNEL_SETTLE_MS);
-        const ready = await fetch(`${wdaUrl}/status`, { signal: AbortSignal.timeout(3_000) })
-            .then((response) => response.ok, () => false);
-        if (settled && ready) return;
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
+    const bundleId = process.env.TIKTOK_BUNDLE_ID ?? 'com.zhiliaoapp.musically';
+    const capabilities: WebdriverIO.Capabilities & Record<string, unknown> = {
+        platformName: 'iOS', 'appium:automationName': 'XCUITest', 'appium:udid': manifest.device.udid,
+        'appium:bundleId': bundleId, 'appium:noReset': true, 'appium:forceAppLaunch': true,
+        'appium:shouldTerminateApp': true, 'appium:newCommandTimeout': 180,
+        'appium:waitForIdleTimeout': 0,
+    };
+    if (process.env.WDA_URL) {
+        capabilities['appium:webDriverAgentUrl'] = process.env.WDA_URL;
+        capabilities['appium:wdaRemotePort'] = positiveInteger('WDA_REMOTE_PORT', 8100);
     }
-    console.log('WDA did not recover within 4 minutes; retrying anyway');
-}
-let driver: Browser | undefined;
-let reachedCaptionScreen = false;
-let lastAttemptError: unknown;
-let pickerFailed = false;
 
-for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptionScreen; attempt += 1) {
-    if (attempt > 1) {
-        console.log(`Retrying up to the caption screen (attempt ${attempt}/${REACH_CAPTION_SCREEN_ATTEMPTS})`);
-        // A RemoteXPC tunnel drop takes WDA down for a minute or two; wait for
-        // it to come back on a settled tunnel instead of burning the retries.
-        await waitForWdaRecovery();
+    // The composer/picker flow (up to the caption screen) is the fragile part —
+    // flaky picker checkboxes, transient tooltips, TikTok UI timing — so it gets
+    // retried with a fresh app relaunch on failure. Caption entry and the final
+    // Post/Drafts tap are NOT retried: retrying after that risks a duplicate
+    // post or draft, which is worse than a single clean failure.
+    const REACH_CAPTION_SCREEN_ATTEMPTS = 3;
+    const WDA_RECOVERY_TIMEOUT_MS = 4 * 60_000;
+
+    async function waitForWdaRecovery(): Promise<void> {
+        const wdaUrl = process.env.WDA_URL ?? 'http://127.0.0.1:8100';
+        const deadline = Date.now() + WDA_RECOVERY_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            const startedAt = await tunnelStartedAt();
+            const settled = startedAt === null || (startedAt !== undefined && Date.now() - startedAt >= TUNNEL_SETTLE_MS);
+            const ready = await fetch(`${wdaUrl}/status`, { signal: AbortSignal.timeout(3_000) })
+                .then((response) => response.ok, () => false);
+            if (settled && ready) return;
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
+        }
+        console.log('WDA did not recover within 4 minutes; retrying anyway');
     }
-    let inPicker = false;
-    try {
-        driver = await remote({ hostname: process.env.APPIUM_HOST ?? '127.0.0.1', port: positiveInteger('APPIUM_PORT', 4725), path: '/', logLevel: 'info', connectionRetryCount: 0, connectionRetryTimeout: 180000, capabilities });
-        await driver.setTimeout({ implicit: 0 });
-        await driver.updateSettings({
-            defaultActiveApplication: bundleId,
-            // Post owns the phone — starve MJPEG harder than warmup defaults
-            // so a leftover Live Control client cannot stall WDA.
-            mjpegServerScreenshotQuality: Number(process.env.POST_MJPEG_QUALITY ?? 15),
-            mjpegScalingFactor: Number(process.env.POST_MJPEG_SCALING ?? 25),
-            mjpegServerFramerate: Number(process.env.POST_MJPEG_FRAMERATE ?? 2),
-            screenshotQuality: 1,
-        });
-        if (switchAccountName) {
-            console.log(`Switching to TikTok account "${switchAccountName}"`);
-            await driver.pause(2000);
-            try {
-                await switchTikTokAccount(driver, deviceRemote, manifest.device.udid, switchAccountName, accountSwitchCoords);
-            } catch (error) {
-                // Profile/switcher coords are often uncalibrated; blocking Create
-                // here aborts the whole draft. Continue on the already-open account.
-                console.warn(
-                    `Account switch skipped (${error instanceof Error ? error.message : String(error)}). `
-                    + 'Continuing with the currently signed-in TikTok account.',
-                );
+    let driver: Browser | undefined;
+    let reachedCaptionScreen = false;
+    let lastAttemptError: unknown;
+    let pickerFailed = false;
+
+    for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptionScreen; attempt += 1) {
+        if (attempt > 1) {
+            console.log(`Retrying up to the caption screen (attempt ${attempt}/${REACH_CAPTION_SCREEN_ATTEMPTS})`);
+            // A RemoteXPC tunnel drop takes WDA down for a minute or two; wait for
+            // it to come back on a settled tunnel instead of burning the retries.
+            await waitForWdaRecovery();
+        }
+        let inPicker = false;
+        try {
+            driver = await remote({ hostname: process.env.APPIUM_HOST ?? '127.0.0.1', port: positiveInteger('APPIUM_PORT', 4725), path: '/', logLevel: 'info', connectionRetryCount: 0, connectionRetryTimeout: 180000, capabilities });
+            await driver.setTimeout({ implicit: 0 });
+            await driver.updateSettings({
+                defaultActiveApplication: bundleId,
+                // Post owns the phone — starve MJPEG harder than warmup defaults
+                // so a leftover Live Control client cannot stall WDA.
+                mjpegServerScreenshotQuality: Number(process.env.POST_MJPEG_QUALITY ?? 15),
+                mjpegScalingFactor: Number(process.env.POST_MJPEG_SCALING ?? 25),
+                mjpegServerFramerate: Number(process.env.POST_MJPEG_FRAMERATE ?? 2),
+                screenshotQuality: 1,
+            });
+            if (switchAccountName) {
+                console.log(`Switching to TikTok account "${switchAccountName}"`);
+                await driver.pause(2000);
+                try {
+                    await switchTikTokAccount(driver, deviceRemote, manifest.device.udid, switchAccountName, accountSwitchCoords);
+                } catch (error) {
+                    // Profile/switcher coords are often uncalibrated; blocking Create
+                    // here aborts the whole draft. Continue on the already-open account.
+                    console.warn(
+                        `Account switch skipped (${error instanceof Error ? error.message : String(error)}). `
+                        + 'Continuing with the currently signed-in TikTok account.',
+                    );
+                }
+            }
+            await openComposer(
+                driver,
+                deviceRemote,
+                manifest.device.udid,
+                tiktokCoordinates,
+                coordinates.screenSize,
+                manifest.musicUrl,
+                manifest.mode ?? 'auto',
+            );
+            inPicker = true;
+            await chooseRecentMedia(
+                driver,
+                deviceRemote,
+                manifest.device.udid,
+                manifest.files,
+                assetCount,
+                tiktokCoordinates,
+                manifest.mode ?? 'auto',
+            );
+            reachedCaptionScreen = true;
+        } catch (error) {
+            lastAttemptError = error;
+            pickerFailed ||= inPicker;
+            console.error(`Attempt ${attempt}/${REACH_CAPTION_SCREEN_ATTEMPTS} failed before reaching the caption screen: ${error instanceof Error ? error.message : String(error)}`);
+            if (driver) {
+                await driver.deleteSession().catch(() => {});
+                driver = undefined;
             }
         }
-        await openComposer(
-            driver,
-            deviceRemote,
-            manifest.device.udid,
-            tiktokCoordinates,
-            coordinates.screenSize,
-            manifest.musicUrl,
-            manifest.mode ?? 'auto',
-        );
-        inPicker = true;
-        await chooseRecentMedia(
-            driver,
-            deviceRemote,
-            manifest.device.udid,
-            manifest.files,
-            assetCount,
-            tiktokCoordinates,
-            manifest.mode ?? 'auto',
-        );
-        reachedCaptionScreen = true;
-    } catch (error) {
-        lastAttemptError = error;
-        pickerFailed ||= inPicker;
-        console.error(`Attempt ${attempt}/${REACH_CAPTION_SCREEN_ATTEMPTS} failed before reaching the caption screen: ${error instanceof Error ? error.message : String(error)}`);
-        if (driver) {
-            await driver.deleteSession().catch(() => {});
-            driver = undefined;
-        }
     }
-}
 
-if (!reachedCaptionScreen || !driver) {
-    // A picker miss can mean Recents no longer starts with this import; the
-    // next run imports afresh rather than reusing it.
-    if (pickerFailed) await forgetImport();
-    throw lastAttemptError instanceof Error
-        ? lastAttemptError
-        : new Error(`Could not reach the TikTok caption screen after ${REACH_CAPTION_SCREEN_ATTEMPTS} attempts`);
-}
+    if (!reachedCaptionScreen || !driver) {
+        // A picker miss can mean Recents no longer starts with this import; the
+        // next run imports afresh rather than reusing it.
+        if (pickerFailed) await forgetImport();
+        throw lastAttemptError instanceof Error
+            ? lastAttemptError
+            : new Error(`Could not reach the TikTok caption screen after ${REACH_CAPTION_SCREEN_ATTEMPTS} attempts`);
+    }
 
-try {
-    await addTitle(driver, manifest.title);
-    await addCaption(driver, tiktokCoordinates, manifest.caption);
-    await tapPublishOrDraft(driver, deviceRemote, manifest.device.udid, tiktokCoordinates, manifest.destination);
+    try {
+        await addTitle(driver, manifest.title);
+        await addCaption(driver, tiktokCoordinates, manifest.caption);
+        await tapPublishOrDraft(driver, deviceRemote, manifest.device.udid, tiktokCoordinates, manifest.destination);
+        published = manifest.destination === 'publish';
+    } finally {
+        await driver.deleteSession();
+    }
 } finally {
-    await driver.deleteSession();
+    console.log(await lockAfterRun(
+        () => deviceRemote.performAction(manifest.device.udid, { type: 'lock' }),
+        published ? LOCK_AFTER_PUBLISH_MS : 0,
+    ));
 }

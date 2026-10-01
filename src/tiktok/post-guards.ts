@@ -62,3 +62,21 @@ export const THERMAL_CRITICAL = 3;
 export function thermalLabel(state: number | undefined): string {
     return ['nominal', 'fair', 'serious', 'critical'][state ?? -1] ?? 'unknown';
 }
+
+/**
+ * Lock the phone once a post run is over, after `delayMs`. Never throws: a failed lock must not
+ * turn a finished post into a failed one. -> the line to log.
+ */
+export async function lockAfterRun(
+    lock: () => Promise<void>,
+    delayMs: number,
+    sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<string> {
+    try {
+        if (delayMs > 0) await sleep(delayMs);
+        await lock();
+        return 'Locked the phone';
+    } catch (error) {
+        return `Could not lock the phone: ${error instanceof Error ? error.message : String(error)}`;
+    }
+}

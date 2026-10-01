@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { canReuseImport, firstDisplayedWithin, mediaFingerprint, thermalLabel } from '../src/tiktok/post-guards.js';
+import { canReuseImport, firstDisplayedWithin, lockAfterRun, mediaFingerprint, thermalLabel } from '../src/tiktok/post-guards.js';
 
 const probe = (found: boolean) => ({ isExisting: async () => found, isDisplayed: async () => found });
 
@@ -43,4 +43,16 @@ test('an import is reused only for the same device, the same media and recently'
 test('thermal states read as words', () => {
     assert.equal(thermalLabel(2), 'serious');
     assert.equal(thermalLabel(undefined), 'unknown');
+});
+
+test('the phone locks after the delay, and a failed lock never throws', async () => {
+    const slept: number[] = [];
+    const sleep = async (ms: number) => { slept.push(ms); };
+    let locks = 0;
+    assert.equal(await lockAfterRun(async () => { locks += 1; }, 60_000, sleep), 'Locked the phone');
+    assert.deepEqual(slept, [60_000]);
+    assert.equal(locks, 1);
+    assert.equal(await lockAfterRun(async () => { locks += 1; }, 0, sleep), 'Locked the phone');
+    assert.deepEqual(slept, [60_000], 'no delay: no sleep');
+    assert.equal(await lockAfterRun(async () => { throw new Error('WDA is down'); }, 0, sleep), 'Could not lock the phone: WDA is down');
 });
