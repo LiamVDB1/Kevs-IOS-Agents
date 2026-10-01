@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    chooseItem, isoWithOffset, newPostIds, retryNotBefore, splitCaption, tiktokIdTime, type Attempt,
+    chooseItem, isoWithOffset, newPostIds, reachedPost, recheckBeforeRetry, retryNotBefore, splitCaption, tiktokIdTime, type Attempt,
 } from '../src/tiktok/queue-runner.js';
 
 const index = {
@@ -91,4 +91,21 @@ test('a backing-off item holds the queue instead of being skipped', () => {
 test('--post-now ignores the backoff', () => {
     const retryAfter = new Map([['a', at('2026-10-02T18:20:00+02:00')]]);
     assert.equal(chooseItem(index, new Map(), new Set(), at('2026-10-02T18:10:00+02:00'), 'a', retryAfter).item, 'a');
+});
+
+test('reachedPost spots the Post tap in an execution log', () => {
+    assert.equal(reachedPost(['Opened TikTok', 'Tapped Post']), true);
+    assert.equal(reachedPost(['TikTok post submitted']), true);
+    assert.equal(reachedPost(['Opened TikTok', 'Execution window expired']), false);
+});
+
+test('a recent failed-before-post attempt is re-read before any retry (2026-10-01: failed at 18:14, posted at 18:22)', () => {
+    const attempt: Attempt = {
+        executionId: 'x', submittedAt: '2026-10-01T18:00:00+02:00', endedAt: '2026-10-01T18:20:00+02:00',
+        status: 'failed-before-post', knownIdsBefore: [],
+    };
+    assert.equal(recheckBeforeRetry(attempt, at('2026-10-01T18:30:00+02:00')), true);
+    assert.equal(recheckBeforeRetry(attempt, at('2026-10-01T22:00:00+02:00')), false);
+    assert.equal(recheckBeforeRetry({ ...attempt, executionId: 'unknown' }, at('2026-10-01T18:30:00+02:00')), false);
+    assert.equal(recheckBeforeRetry({ ...attempt, status: 'uncertain' }, at('2026-10-01T18:30:00+02:00')), false);
 });

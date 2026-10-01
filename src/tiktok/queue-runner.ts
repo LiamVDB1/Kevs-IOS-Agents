@@ -53,6 +53,7 @@ const TIKTOK_HANDLE = (process.env.TIKTOK_HANDLE ?? 'assayist').replace(/^@/, ''
 const TIMEZONE = process.env.QUEUE_TIMEZONE ?? 'Europe/Brussels';
 const RECEIPT_TIMEOUT_MS = 20 * 60_000;
 const EXECUTION_TIMEOUT_MS = 90 * 60_000;
+const RECHECK_WINDOW_MS = 3 * 60 * 60_000;
 const PHOTO_POST = { pluginId: 'com.git-agni.tiktok', taskType: 'photo-post', taskVersion: 1 };
 // A failing post retries after 15, 30, then every 60 minutes, so a sick phone gets time to recover
 // and is not hammered with back-to-back full attempts.
@@ -105,6 +106,20 @@ export function retryNotBefore(attempts: Attempt[], backoffMs: number[] = RETRY_
     const endedAt = Date.parse(last.endedAt ?? last.submittedAt);
     if (!Number.isFinite(endedAt)) return undefined;
     return endedAt + backoffMs[Math.min(failures, backoffMs.length) - 1]!;
+}
+
+/** Whether an execution's log shows it reached TikTok's Post button. */
+export const reachedPost = (lines: string[]): boolean => lines.some((line) => /Tapped Post|TikTok post submitted/.test(line));
+
+/**
+ * Whether a "failed before Post" attempt should have its log read again before any retry. The farm can
+ * mark an execution failed while its post process is still starting (2026-10-01: abandoned at 18:14,
+ * Post tapped at 18:22), so the log read at settle time is not the last word. Recent attempts only.
+ */
+export function recheckBeforeRetry(attempt: Attempt, nowMs: number, windowMs = RECHECK_WINDOW_MS): boolean {
+    if (attempt.status !== 'failed-before-post' || !attempt.executionId || attempt.executionId === 'unknown') return false;
+    const endedAt = Date.parse(attempt.endedAt ?? attempt.submittedAt);
+    return Number.isFinite(endedAt) && nowMs - endedAt < windowMs;
 }
 
 /** TikTok ids carry their creation time in the top 32 bits. */
@@ -279,8 +294,7 @@ async function settleAttempt(attempt: Attempt, execution: { id: string; status: 
         return;
     }
     const logs = execution.id === 'unknown' ? [] : await executionLogs(execution.id).catch(() => [] as string[]);
-    const reachedPost = logs.some((line) => /Tapped Post|TikTok post submitted/.test(line));
-    attempt.status = reachedPost || execution.status === 'timeout' ? 'uncertain' : 'failed-before-post';
+    attempt.status = reachedPost(logs) || execution.status === 'timeout' ? 'uncertain' : 'failed-before-post';
     attempt.error = execution.error ?? execution.status;
 }
 
@@ -310,6 +324,12 @@ async function main(): Promise<void> {
                 await saveState(state);
                 console.log(`${item}: earlier execution ${execution.id} ${execution.status}`);
             }
+        }
+        if (recheckBeforeRetry(last, Date.now()) && reachedPost(await executionLogs(last.executionId).catch(() => [] as string[]))) {
+            last.status = 'uncertain';
+            last.error = `${last.error ?? 'failed'}; reached Post after it was marked failed`;
+            await saveState(state);
+            console.log(`${item}: execution ${last.executionId} reached Post after it was marked failed; not retrying`);
         }
         if (last.status === 'succeeded' || last.status === 'uncertain') {
             const caption = await readFile(path.join(QUEUE_DIR, item, 'caption.txt'), 'utf8').catch(() => '');

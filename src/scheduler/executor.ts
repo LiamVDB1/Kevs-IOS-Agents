@@ -13,6 +13,9 @@ import type { PluginRegistry } from '../registry.js';
 import type { TaskExecutionResult } from '../types.js';
 import type { SchedulerRepository } from './repository.js';
 
+/** How often a running execution marks itself alive; far below reconcile's 5-minute minimum abandon grace. */
+const HEARTBEAT_MS = 30_000;
+
 async function endpointReady(url: string): Promise<boolean> {
     try {
         return (await fetch(url, { signal: AbortSignal.timeout(3_000) })).ok;
@@ -167,6 +170,10 @@ export async function executeAutomation(
     const stopPoll = setInterval(() => void repository.stopRequested(execution.id).then((requested) => {
         if (requested) controller.abort(new Error('Stop requested'));
     }).catch(console.error), 1_000);
+    // Heartbeat for the whole execution, device wait included: the wait for a tunnel drop and WDA
+    // relaunch can outlast reconcile's abandon grace, which once failed a run that then posted anyway.
+    const heartbeat = setInterval(() => void repository.heartbeat(execution.id).catch(console.error), HEARTBEAT_MS);
+    const stopTimers = () => { clearInterval(stopPoll); clearInterval(heartbeat); };
     let estimatedDurationMs = 10 * 60_000;
     try {
         estimatedDurationMs = plugins.task({
@@ -177,9 +184,16 @@ export async function executeAutomation(
     try {
         device = await waitForDevice(execution, registered, controller.signal, requiredTunnelWindowMs(estimatedDurationMs));
     } catch (error) {
-        clearInterval(stopPoll);
+        stopTimers();
         signal.removeEventListener('abort', forwardAbort);
         return { exitCode: null, stopped: controller.signal.aborted, error: error instanceof Error ? error.message : String(error) };
+    }
+    // Never start a task whose execution was finalized while it waited: whoever finalized it may
+    // already have scheduled a replacement, and a post must not go up twice.
+    if (!await repository.isRunning(execution.id)) {
+        stopTimers();
+        signal.removeEventListener('abort', forwardAbort);
+        return { exitCode: null, stopped: true, error: 'Execution was finalized while waiting for the device; not starting it' };
     }
     const workspaceDirectory = await mkdtemp(`${os.tmpdir()}/phone-farm-${execution.id}-`);
     const task = { pluginId: execution.pluginId, taskType: execution.taskType, taskVersion: execution.taskVersion, payload: execution.payload };
@@ -211,7 +225,7 @@ export async function executeAutomation(
     } catch (error) {
         return { exitCode: null, stopped: controller.signal.aborted, error: error instanceof Error ? error.message : String(error) };
     } finally {
-        clearInterval(stopPoll);
+        stopTimers();
         signal.removeEventListener('abort', forwardAbort);
         await rm(workspaceDirectory, { recursive: true, force: true });
     }

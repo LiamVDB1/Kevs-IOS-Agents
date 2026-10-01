@@ -260,9 +260,20 @@ export class SchedulerRepository {
     async appendLogs(id: string, attempt: number, lines: string[]): Promise<void> {
         if (!lines.length) return;
         await this.connection.db.insert(executionLogs).values(lines.map((line) => ({ executionId: id, attempt, line })));
-        // Heartbeat so reconcile does not treat a healthy long post as a zombie.
+        await this.heartbeat(id);
+    }
+
+    /** Mark a running execution alive so reconcile does not treat a healthy long wait or post as a zombie. */
+    async heartbeat(id: string): Promise<void> {
         await this.connection.db.update(executions).set({ updatedAt: new Date() })
             .where(and(eq(executions.id, id), eq(executions.status, 'running')));
+    }
+
+    /** Whether the execution is still running: reconcile or a stop may have finalized it while the worker waited. */
+    async isRunning(id: string): Promise<boolean> {
+        const [row] = await this.connection.db.select({ status: executions.status }).from(executions)
+            .where(eq(executions.id, id)).limit(1);
+        return row?.status === 'running';
     }
 
     async finishAttempt(id: string, attempt: number, exitCode: number | null, error?: string): Promise<void> {
@@ -426,7 +437,7 @@ export class SchedulerRepository {
                         execution.id,
                         execution.stopRequestedAt ? 'stopped' : 'failed',
                         null,
-                        'Abandoned active queue job after worker restart',
+                        'Abandoned active queue job: no worker heartbeat',
                     );
                     changed += 1;
                     console.log(`Finalized zombie running execution ${execution.id} (no heartbeat for ${Math.round(ageMs / 1000)}s)`);
