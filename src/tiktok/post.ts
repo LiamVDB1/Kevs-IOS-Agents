@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -14,10 +15,20 @@ import { recentPickerTargets } from './post-layout.js';
 import { isRedCheckboxChecked } from './pixel.js';
 import { matchPickerCellToVideo, filterCellsByDurationBadge, scoreCellsAgainstImages, verifyExpectedAssignment } from './post-picker-match.js';
 import { recognizeWords } from './ocr.js';
+import {
+    canReuseImport, firstDisplayedWithin, mediaFingerprint, thermalLabel, THERMAL_CRITICAL, THERMAL_SERIOUS,
+    type ImportMarker,
+} from './post-guards.js';
 import { TUNNEL_SETTLE_MS, tunnelStartedAt } from '../devices/wda/tunnel-window.js';
 
 const execFileAsync = promisify(execFile);
 const POST_DEBUG_DIR = path.resolve('.wda', 'post-debug');
+const IMPORT_MARKER_FILE = path.resolve('.wda', 'last-media-import.json');
+// Recents order only holds while nothing newer lands in Photos; past this, import again.
+const IMPORT_REUSE_MS = 6 * 60 * 60_000;
+// A healthy phone answers the Photo-mode probes in ~3 s. Past this, go straight to OCR.
+const PHOTO_MODE_A11Y_BUDGET_MS = 8_000;
+const THERMAL_WAIT_MS = 10 * 60_000;
 
 async function savePostDebugScreenshot(remote: WdaRemoteControl, udid: string, label: string): Promise<string | undefined> {
     // Extra WDA screenshots compete with MJPEG — only when debugging a picker/publish miss.
@@ -187,6 +198,71 @@ function positiveInteger(name: string, fallback: number): number {
     const value = Number.parseInt(raw, 10);
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
     return value;
+}
+
+async function readImportMarker(): Promise<ImportMarker | undefined> {
+    try {
+        return JSON.parse(await readFile(IMPORT_MARKER_FILE, 'utf8')) as ImportMarker;
+    } catch {
+        return undefined;
+    }
+}
+
+async function forgetImport(): Promise<void> {
+    await rm(IMPORT_MARKER_FILE, { force: true }).catch((error) => {
+        console.warn(`Could not clear ${IMPORT_MARKER_FILE}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+/**
+ * Import the media unless the phone's last import was this exact set, recently. A retried post
+ * then picks the copies already at the front of Recents instead of adding another full set.
+ */
+async function importMediaOnce(manifest: PostManifest): Promise<number> {
+    const digests: string[] = [];
+    for (const file of manifest.files) digests.push(createHash('sha256').update(await readFile(file.path)).digest('hex'));
+    const fingerprint = mediaFingerprint(digests);
+    const marker = await readImportMarker();
+    if (canReuseImport(marker, manifest.device.udid, fingerprint, Date.now(), IMPORT_REUSE_MS)) {
+        console.log(`Media already imported at ${marker!.importedAt}; reusing it instead of importing again`);
+        return marker!.assetCount;
+    }
+    const assetCount = await importMedia(manifest);
+    const next: ImportMarker = { udid: manifest.device.udid, fingerprint, importedAt: new Date().toISOString(), assetCount };
+    await mkdir(path.dirname(IMPORT_MARKER_FILE), { recursive: true });
+    await writeFile(IMPORT_MARKER_FILE, `${JSON.stringify(next, null, 2)}\n`);
+    return assetCount;
+}
+
+async function thermalState(): Promise<number | undefined> {
+    const wdaUrl = process.env.WDA_URL ?? 'http://127.0.0.1:8100';
+    try {
+        const response = await fetch(`${wdaUrl}/wda/device/info`, { signal: AbortSignal.timeout(10_000) });
+        const body = await response.json() as { value?: { thermalState?: unknown } };
+        return typeof body.value?.thermalState === 'number' ? body.value.thermalState : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * A throttling phone turns every accessibility query on TikTok's camera screen into a minute
+ * and then drops WDA. Give a hot phone time to cool; refuse only when it is critical.
+ */
+async function waitForSafeThermals(): Promise<void> {
+    const deadline = Date.now() + THERMAL_WAIT_MS;
+    let state = await thermalState();
+    while (state !== undefined && state >= THERMAL_SERIOUS && Date.now() < deadline) {
+        console.log(`Phone thermal state is ${thermalLabel(state)}; waiting for it to cool before opening TikTok`);
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+        state = await thermalState();
+    }
+    if (state !== undefined && state >= THERMAL_CRITICAL) {
+        throw new Error(`Phone thermal state is still ${thermalLabel(state)} after ${THERMAL_WAIT_MS / 60_000} minutes; not posting`);
+    }
+    if (state !== undefined && state >= THERMAL_SERIOUS) {
+        console.warn(`Phone thermal state is still ${thermalLabel(state)}; continuing, expect slow WDA`);
+    }
 }
 
 async function importMedia(manifest: PostManifest): Promise<number> {
@@ -405,14 +481,25 @@ async function openComposer(
         // Photo Mode is a semantic requirement for Assayist decks. Do not fall
         // back to a guessed coordinate: a wrong mode silently turns a carousel
         // into a video/story, which is worse than a clean failure.
+        // Single probes (implicit wait 0) under a time budget: on a hot phone
+        // each query takes a minute, and four of them took WDA down before
+        // OCR ever ran.
         try {
-            await clickOne(driver, 'Photo mode', [
+            const { element, timedOut } = await firstDisplayedWithin(async (selector) => await driver.$(selector), [
                 '~Photo', '~Photos', '~Foto',
                 '-ios predicate string:(label == "Photo" OR name == "Photo" OR label == "Photos" OR name == "Photos" OR label == "Foto" OR name == "Foto") AND visible == 1',
                 '-ios class chain:**/XCUIElementTypeStaticText[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
                 '-ios class chain:**/XCUIElementTypeButton[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
-            ]);
-            await driver.pause(700);
+            ], PHOTO_MODE_A11Y_BUDGET_MS);
+            if (element) {
+                await element.click();
+                console.log('Tapped Photo mode');
+                await driver.pause(700);
+            } else {
+                console.log(timedOut
+                    ? `Photo mode lookup exceeded ${PHOTO_MODE_A11Y_BUDGET_MS / 1000}s; using OCR`
+                    : 'Photo mode not in the accessibility tree; using OCR');
+            }
         } catch (error) {
             console.log(`Photo mode not in the accessibility tree (${error instanceof Error ? error.message : String(error)}); using OCR`);
         }
@@ -972,7 +1059,8 @@ const deviceRemote = new WdaRemoteControl({
 console.log('Checking device lock state');
 await deviceRemote.unlock(manifest.device.udid);
 
-const assetCount = await importMedia(manifest);
+await waitForSafeThermals();
+const assetCount = await importMediaOnce(manifest);
 
 const bundleId = process.env.TIKTOK_BUNDLE_ID ?? 'com.zhiliaoapp.musically';
 const capabilities: WebdriverIO.Capabilities & Record<string, unknown> = {
@@ -1010,6 +1098,7 @@ async function waitForWdaRecovery(): Promise<void> {
 let driver: Browser | undefined;
 let reachedCaptionScreen = false;
 let lastAttemptError: unknown;
+let pickerFailed = false;
 
 for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptionScreen; attempt += 1) {
     if (attempt > 1) {
@@ -1018,6 +1107,7 @@ for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptio
         // it to come back on a settled tunnel instead of burning the retries.
         await waitForWdaRecovery();
     }
+    let inPicker = false;
     try {
         driver = await remote({ hostname: process.env.APPIUM_HOST ?? '127.0.0.1', port: positiveInteger('APPIUM_PORT', 4725), path: '/', logLevel: 'info', connectionRetryCount: 0, connectionRetryTimeout: 180000, capabilities });
         await driver.setTimeout({ implicit: 0 });
@@ -1053,6 +1143,7 @@ for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptio
             manifest.musicUrl,
             manifest.mode ?? 'auto',
         );
+        inPicker = true;
         await chooseRecentMedia(
             driver,
             deviceRemote,
@@ -1065,6 +1156,7 @@ for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptio
         reachedCaptionScreen = true;
     } catch (error) {
         lastAttemptError = error;
+        pickerFailed ||= inPicker;
         console.error(`Attempt ${attempt}/${REACH_CAPTION_SCREEN_ATTEMPTS} failed before reaching the caption screen: ${error instanceof Error ? error.message : String(error)}`);
         if (driver) {
             await driver.deleteSession().catch(() => {});
@@ -1074,6 +1166,9 @@ for (let attempt = 1; attempt <= REACH_CAPTION_SCREEN_ATTEMPTS && !reachedCaptio
 }
 
 if (!reachedCaptionScreen || !driver) {
+    // A picker miss can mean Recents no longer starts with this import; the
+    // next run imports afresh rather than reusing it.
+    if (pickerFailed) await forgetImport();
     throw lastAttemptError instanceof Error
         ? lastAttemptError
         : new Error(`Could not reach the TikTok caption screen after ${REACH_CAPTION_SCREEN_ATTEMPTS} attempts`);

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { chooseItem, isoWithOffset, newPostIds, splitCaption, tiktokIdTime } from '../src/tiktok/queue-runner.js';
+import {
+    chooseItem, isoWithOffset, newPostIds, retryNotBefore, splitCaption, tiktokIdTime, type Attempt,
+} from '../src/tiktok/queue-runner.js';
 
 const index = {
     schema: 'assayist/queue/v1',
@@ -59,4 +61,34 @@ test('caption.txt splits into TikTok title and description only when it is exact
     const manifest = { schema: '', post_id: '', post_after: '', kind: 'photo', slides: [], title: 'T', description: 'D #x' };
     assert.deepEqual(splitCaption('T\n\nD #x\n', manifest), { title: 'T', caption: 'D #x' });
     assert.deepEqual(splitCaption('Something else\n', manifest), { caption: 'Something else' });
+});
+
+const failed = (endedAt: string): Attempt => ({
+    executionId: 'x', submittedAt: endedAt, endedAt, status: 'failed-before-post', knownIdsBefore: [],
+});
+
+test('a failed item backs off 15, 30, then 60 minutes', () => {
+    const t = '2026-10-01T12:00:00+02:00';
+    assert.equal(retryNotBefore([]), undefined);
+    assert.equal(retryNotBefore([failed(t)]), at(t) + 15 * 60_000);
+    assert.equal(retryNotBefore([failed(t), failed(t)]), at(t) + 30 * 60_000);
+    assert.equal(retryNotBefore([failed(t), failed(t), failed(t), failed(t)]), at(t) + 60 * 60_000);
+});
+
+test('backoff falls back to the submission time for attempts recorded before endedAt existed', () => {
+    const attempt: Attempt = { executionId: 'x', submittedAt: '2026-10-01T12:00:00+02:00', status: 'failed-before-post', knownIdsBefore: [] };
+    assert.equal(retryNotBefore([attempt]), at('2026-10-01T12:15:00+02:00'));
+});
+
+test('a backing-off item holds the queue instead of being skipped', () => {
+    const retryAfter = new Map([['a', at('2026-10-02T18:20:00+02:00')]]);
+    const early = chooseItem(index, new Map(), new Set(), at('2026-10-02T18:10:00+02:00'), undefined, retryAfter);
+    assert.equal(early.item, undefined);
+    assert.match(early.why, /a failed recently/);
+    assert.equal(chooseItem(index, new Map(), new Set(), at('2026-10-02T18:21:00+02:00'), undefined, retryAfter).item, 'a');
+});
+
+test('--post-now ignores the backoff', () => {
+    const retryAfter = new Map([['a', at('2026-10-02T18:20:00+02:00')]]);
+    assert.equal(chooseItem(index, new Map(), new Set(), at('2026-10-02T18:10:00+02:00'), 'a', retryAfter).item, 'a');
 });

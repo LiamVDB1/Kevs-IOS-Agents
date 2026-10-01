@@ -36,6 +36,8 @@ export interface Attempt {
     executionId: string;
     submittedAt: string;
     status: 'running' | 'succeeded' | 'failed-before-post' | 'uncertain';
+    /** When the execution ended; retries back off from here. */
+    endedAt?: string;
     knownIdsBefore: string[];
     error?: string;
 }
@@ -52,6 +54,9 @@ const TIMEZONE = process.env.QUEUE_TIMEZONE ?? 'Europe/Brussels';
 const RECEIPT_TIMEOUT_MS = 20 * 60_000;
 const EXECUTION_TIMEOUT_MS = 90 * 60_000;
 const PHOTO_POST = { pluginId: 'com.git-agni.tiktok', taskType: 'photo-post', taskVersion: 1 };
+// A failing post retries after 15, 30, then every 60 minutes, so a sick phone gets time to recover
+// and is not hammered with back-to-back full attempts.
+const RETRY_BACKOFF_MS = [15 * 60_000, 30 * 60_000, 60 * 60_000];
 
 // ---------- pure decisions (tested) ----------
 
@@ -65,6 +70,7 @@ export function chooseItem(
     blocked: Set<string>,
     nowMs: number,
     forceItem?: string,
+    retryAfter: Map<string, number> = new Map(),
 ): { item?: string; why: string } {
     if (forceItem) {
         if (!index.items.some(({ item }) => item === forceItem)) return { why: `${forceItem} is not in the queue` };
@@ -78,7 +84,27 @@ export function chooseItem(
     const postedThisSlot = [...posted.values()].some((at) => Date.parse(at) >= slotStart);
     if (postedThisSlot) return { why: 'this slot already has a post' };
     const next = due.find(({ item }) => !posted.has(item) && !blocked.has(item));
-    return next ? { item: next.item, why: 'due' } : { why: 'every due item is posted or awaiting a receipt' };
+    if (!next) return { why: 'every due item is posted or awaiting a receipt' };
+    // Items go up in order, so a backing-off item holds the queue rather than being skipped.
+    const notBefore = retryAfter.get(next.item);
+    if (notBefore !== undefined && nowMs < notBefore) {
+        return { why: `${next.item} failed recently; retrying after ${new Date(notBefore).toISOString()}` };
+    }
+    return { item: next.item, why: 'due' };
+}
+
+/** When an item whose last attempts failed before Post may be tried again (undefined: now). */
+export function retryNotBefore(attempts: Attempt[], backoffMs: number[] = RETRY_BACKOFF_MS): number | undefined {
+    let failures = 0;
+    for (const attempt of [...attempts].reverse()) {
+        if (attempt.status !== 'failed-before-post') break;
+        failures += 1;
+    }
+    if (!failures) return undefined;
+    const last = attempts.at(-1)!;
+    const endedAt = Date.parse(last.endedAt ?? last.submittedAt);
+    if (!Number.isFinite(endedAt)) return undefined;
+    return endedAt + backoffMs[Math.min(failures, backoffMs.length) - 1]!;
 }
 
 /** TikTok ids carry their creation time in the top 32 bits. */
@@ -247,6 +273,7 @@ async function findExecution(scheduleId: string): Promise<{ id: string; status: 
 /** Record how an execution ended; anything that may have reached Post is "uncertain", never retried. */
 async function settleAttempt(attempt: Attempt, execution: { id: string; status: string; error?: string }): Promise<void> {
     attempt.executionId = execution.id;
+    attempt.endedAt = new Date().toISOString();
     if (execution.status === 'succeeded') {
         attempt.status = 'succeeded';
         return;
@@ -295,7 +322,10 @@ async function main(): Promise<void> {
         .filter(([item, { attempts }]) => !posted.has(item)
             && attempts.some((attempt) => attempt.status === 'running' || attempt.status === 'succeeded' || attempt.status === 'uncertain'))
         .map(([item]) => item));
-    const choice = chooseItem(index, posted, blocked, Date.now(), forceItem);
+    const retryAfter = new Map(Object.entries(state.items)
+        .map(([item, { attempts }]) => [item, retryNotBefore(attempts)] as const)
+        .filter((entry): entry is readonly [string, number] => entry[1] !== undefined));
+    const choice = chooseItem(index, posted, blocked, Date.now(), forceItem, retryAfter);
     console.log(`Queue: ${index.items.length} item(s); ${posted.size} posted; ${choice.item ? `posting ${choice.item}` : choice.why}`);
     if (!choice.item) return;
     const item = choice.item;
