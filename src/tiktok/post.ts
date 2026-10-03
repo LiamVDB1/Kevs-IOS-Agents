@@ -21,6 +21,7 @@ import {
     type ImportMarker,
 } from './post-guards.js';
 import { TUNNEL_SETTLE_MS, tunnelStartedAt } from '../devices/wda/tunnel-window.js';
+import { withWdaRelaunch } from '../devices/wda-recover.js';
 
 const execFileAsync = promisify(execFile);
 const POST_DEBUG_DIR = path.resolve('.wda', 'post-debug');
@@ -1038,7 +1039,7 @@ const deviceRemote = new WdaRemoteControl({
     passcodeKeypadLayout: coordinates.passcodeKeypad,
 });
 console.log('Checking device lock state');
-await deviceRemote.unlock(manifest.device.udid);
+await withWdaRelaunch(manifest.device.udid, () => deviceRemote.unlock(manifest.device.udid));
 
 // A run that ends with the screen on leaves it on all day, which keeps the phone warm. After a
 // publish TikTok is still uploading in the foreground, so the lock waits a minute longer.
