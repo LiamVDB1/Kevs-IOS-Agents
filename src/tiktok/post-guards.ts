@@ -63,20 +63,32 @@ export function thermalLabel(state: number | undefined): string {
     return ['nominal', 'fair', 'serious', 'critical'][state ?? -1] ?? 'unknown';
 }
 
+// WDA can stay busy for minutes after the last TikTok query of a run (2026-10-03: a hung
+// post-publish lookup left it unavailable for ~2 min), so a single lock attempt left the
+// screen on all evening. Locking is idempotent, so retrying is safe.
+export const LOCK_RETRY_DELAYS_MS = [30_000, 60_000, 90_000];
+
 /**
- * Lock the phone once a post run is over, after `delayMs`. Never throws: a failed lock must not
- * turn a finished post into a failed one. -> the line to log.
+ * Lock the phone once a post run is over, after `delayMs`, retrying after each of
+ * `retryDelaysMs`. Never throws: a failed lock must not turn a finished post into a failed one.
+ * -> the line to log.
  */
 export async function lockAfterRun(
     lock: () => Promise<void>,
     delayMs: number,
     sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    retryDelaysMs: readonly number[] = LOCK_RETRY_DELAYS_MS,
 ): Promise<string> {
-    try {
-        if (delayMs > 0) await sleep(delayMs);
-        await lock();
-        return 'Locked the phone';
-    } catch (error) {
-        return `Could not lock the phone: ${error instanceof Error ? error.message : String(error)}`;
+    if (delayMs > 0) await sleep(delayMs);
+    let lastError: unknown;
+    for (const [attempt, retryDelay] of [0, ...retryDelaysMs].entries()) {
+        if (retryDelay > 0) await sleep(retryDelay);
+        try {
+            await lock();
+            return attempt === 0 ? 'Locked the phone' : `Locked the phone after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`;
+        } catch (error) {
+            lastError = error;
+        }
     }
+    return `Could not lock the phone: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
 }

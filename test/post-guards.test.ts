@@ -56,3 +56,19 @@ test('the phone locks after the delay, and a failed lock never throws', async ()
     assert.deepEqual(slept, [60_000], 'no delay: no sleep');
     assert.equal(await lockAfterRun(async () => { throw new Error('WDA is down'); }, 0, sleep), 'Could not lock the phone: WDA is down');
 });
+
+test('a busy WDA is retried until the lock lands, and a dead one is reported after the last retry', async () => {
+    const slept: number[] = [];
+    const sleep = async (ms: number) => { slept.push(ms); };
+    let calls = 0;
+    const flaky = async () => { calls += 1; if (calls < 3) throw new Error('WebDriverAgent is unavailable'); };
+    assert.equal(await lockAfterRun(flaky, 60_000, sleep, [30_000, 60_000, 90_000]), 'Locked the phone after 2 retries');
+    assert.deepEqual(slept, [60_000, 30_000, 60_000]);
+
+    slept.length = 0;
+    let attempts = 0;
+    const dead = async () => { attempts += 1; throw new Error('WebDriverAgent is unavailable'); };
+    assert.equal(await lockAfterRun(dead, 0, sleep, [30_000, 60_000]), 'Could not lock the phone: WebDriverAgent is unavailable');
+    assert.equal(attempts, 3);
+    assert.deepEqual(slept, [30_000, 60_000]);
+});
