@@ -17,7 +17,7 @@ import { matchPickerCellToVideo, filterCellsByDurationBadge, scoreCellsAgainstIm
 import { recognizeWords } from './ocr.js';
 import {
     canReuseImport,
-    firstDisplayedWithin, lockAfterRun, mediaFingerprint, thermalLabel, THERMAL_CRITICAL, THERMAL_SERIOUS,
+    lockAfterRun, mediaFingerprint, thermalLabel, THERMAL_CRITICAL, THERMAL_SERIOUS,
     type ImportMarker,
 } from './post-guards.js';
 import { TUNNEL_SETTLE_MS, tunnelStartedAt } from '../devices/wda/tunnel-window.js';
@@ -27,8 +27,6 @@ const POST_DEBUG_DIR = path.resolve('.wda', 'post-debug');
 const IMPORT_MARKER_FILE = path.resolve('.wda', 'last-media-import.json');
 // Recents order only holds while nothing newer lands in Photos; past this, import again.
 const IMPORT_REUSE_MS = 6 * 60 * 60_000;
-// A healthy phone answers the Photo-mode probes in ~3 s. Past this, go straight to OCR.
-const PHOTO_MODE_A11Y_BUDGET_MS = 8_000;
 const THERMAL_WAIT_MS = 10 * 60_000;
 
 async function savePostDebugScreenshot(remote: WdaRemoteControl, udid: string, label: string): Promise<string | undefined> {
@@ -482,28 +480,10 @@ async function openComposer(
         // Photo Mode is a semantic requirement for Assayist decks. Do not fall
         // back to a guessed coordinate: a wrong mode silently turns a carousel
         // into a video/story, which is worse than a clean failure.
-        // Single probes (implicit wait 0) under a time budget: on a hot phone
-        // each query takes a minute, and four of them took WDA down before
-        // OCR ever ran.
-        try {
-            const { element, timedOut } = await firstDisplayedWithin(async (selector) => await driver.$(selector), [
-                '~Photo', '~Photos', '~Foto',
-                '-ios predicate string:(label == "Photo" OR name == "Photo" OR label == "Photos" OR name == "Photos" OR label == "Foto" OR name == "Foto") AND visible == 1',
-                '-ios class chain:**/XCUIElementTypeStaticText[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
-                '-ios class chain:**/XCUIElementTypeButton[`label == "Photo" OR label == "Photos" OR label == "Foto"`]',
-            ], PHOTO_MODE_A11Y_BUDGET_MS);
-            if (element) {
-                await element.click();
-                console.log('Tapped Photo mode');
-                await driver.pause(700);
-            } else {
-                console.log(timedOut
-                    ? `Photo mode lookup exceeded ${PHOTO_MODE_A11Y_BUDGET_MS / 1000}s; using OCR`
-                    : 'Photo mode not in the accessibility tree; using OCR');
-            }
-        } catch (error) {
-            console.log(`Photo mode not in the accessibility tree (${error instanceof Error ? error.message : String(error)}); using OCR`);
-        }
+        // OCR only: current builds never expose PHOTO in the accessibility tree,
+        // and a `visible == 1` query on the live camera screen can wedge WDA for
+        // over ten minutes (an aborted client request does not stop WDA), which
+        // failed every P010 retry on 2026-10-02/03.
         await ensurePhotoModeByOcr(driver, remote, udid, screenSize);
     } else {
         // Camera defaults to PHOTO/TEXT often. Opening the gallery from PHOTO
