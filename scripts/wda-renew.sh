@@ -19,7 +19,29 @@ for _ in $(seq 1 60); do
     sleep 60
 done
 
-"$XTOOL" install --udid "$UDID" --usb "$WDA_APP" </dev/null
+# xtool asks "Continue? (yes/no)" when it must revoke another development certificate
+# (a free Apple ID keeps one). With stdin on /dev/null it crashed (epoll EPERM) and the
+# timer failed silently. Answer "no" so it stops cleanly, and say why: revoking breaks
+# whatever made the other certificate, so a person decides (rerun xtool by hand, answer yes).
+log="$(mktemp)"
+trap 'rm -f "$log"' EXIT
+set +e
+printf 'no\n' | "$XTOOL" install --udid "$UDID" --usb "$WDA_APP" 2>&1 | tee "$log"
+status=${PIPESTATUS[1]}
+set -e
+if grep -q 'must be revoked' "$log"; then
+    echo "WDA NOT renewed: another Apple Development certificate exists on this Apple ID." >&2
+    echo "Run '$XTOOL install --udid $UDID --usb $WDA_APP' by hand and answer yes to revoke it." >&2
+    exit 1
+fi
+if [ "$status" -ne 0 ] || ! grep -q 'Successfully installed' "$log"; then
+    echo "WDA NOT renewed: xtool exited $status" >&2
+    exit 1
+fi
+
+# Reinstalling can drop the personalized developer disk image; XCTest needs it mounted.
+"${PYMOBILEDEVICE3:-$HOME/.local/bin/pymobiledevice3}" mounter auto-mount --udid "$UDID" \
+    || echo "Warning: could not mount the developer disk image; WDA may not start" >&2
 
 curl --fail --silent --show-error --max-time 10 --unix-socket "$SOCKET" \
     -X POST "http://localhost/devices/$UDID/reconnect" >/dev/null
