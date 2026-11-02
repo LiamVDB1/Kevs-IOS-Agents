@@ -29,9 +29,17 @@ set +e
 printf 'no\n' | "$XTOOL" install --udid "$UDID" --usb "$WDA_APP" 2>&1 | tee "$log"
 status=${PIPESTATUS[1]}
 set -e
+if grep -q 'xtool auth' "$log"; then
+    echo "WDA NOT renewed: xtool is logged out of the Apple ID." >&2
+    echo "Liam must run 'xtool auth login -u <apple-id> --mode password' on macserver (password + 2FA code)." >&2
+    exit 1
+fi
 if grep -q 'must be revoked' "$log"; then
-    echo "WDA NOT renewed: another Apple Development certificate exists on this Apple ID." >&2
-    echo "Run '$XTOOL install --udid $UDID --usb $WDA_APP' by hand and answer yes to revoke it." >&2
+    # xtool <1.24 dropped leading zeros from certificate serials, so it failed to
+    # recognise its OWN certificate and offered to revoke it (xtool issue #305).
+    echo "WDA NOT renewed: xtool wants to revoke a certificate. Do not answer yes blindly." >&2
+    echo "Compare 'xtool ds certificates list' with the serial in ~/.config/xtool/data; if it is xtool's own" >&2
+    echo "certificate, this is the serial bug (fixed in xtool 1.24.0), not another app." >&2
     exit 1
 fi
 if [ "$status" -ne 0 ] || ! grep -q 'Successfully installed' "$log"; then
